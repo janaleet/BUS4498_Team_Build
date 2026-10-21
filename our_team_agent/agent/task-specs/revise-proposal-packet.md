@@ -7,10 +7,10 @@ task_name: "Revise proposal packet"
 task_owner: "Proposed event-space employee"
 
 # Agent Inference Configuration
-Provider: "OpenAI"
-Model: "gpt-5.6-terra"
+Provider: "Anthropic"
+Model: "claude-sonnet-5-5"
 Role: "Proposal-revision agent that may inspect findings, verify source details, revise draft content, and check completeness. It may not approve, release, or send the proposal."
-Maximum inference requests per task run: "3"
+Maximum inference requests per task run: "8"
 On inference failure or exhausted limits: "Record the unresolved status and hand off to the event coordinator/designated human proposal reviewer."
 ```
 
@@ -37,7 +37,8 @@ On inference failure or exhausted limits: "Record the unresolved status and hand
 ### Task-Wide Limits
 
 - **Total task timeout:** 10 minutes
-- **Maximum tool calls:** 3
+- **Maximum tool calls:** 8 (four subtasks plus one retry each)
+- **Maximum revision rounds:** 2 per inquiry ID. On a third Needs revision outcome from T6, T7 does not run; the packet goes to the event coordinator.
 
 ### Tool 1
 
@@ -47,7 +48,7 @@ On inference failure or exhausted limits: "Record the unresolved status and hand
 - **Allowed use:** Read the T6 review, proposal draft, T1/T3 source information, and approved template content; create a revised draft and revision summary in the current task workspace.
 - **Prohibited use:** Invent facts, change source records, retain unnecessary client personal information, approve or release the proposal, contact the client, or send external messages.
 - **Approval required:** Human approval is required before release or client-facing handoff. None is required for creating the internal revised draft.
-- **Timeout per call:** 3 minutes
+- **Timeout per call:** 60 seconds
 - **Maximum retries per call:** 1 additional attempt.
 - **Retry conditions and failure response:** Retry once after a transient failure or timeout, waiting 30 seconds. Do not create a duplicate version; preserve the existing version identifier. If the retry fails or the task limit is reached, record the unresolved status and hand off to the human proposal reviewer.
 
@@ -85,10 +86,12 @@ Tool-specific and task-wide limits both apply; stop at whichever is reached firs
 
 - **Decision guidance:** After each subtask, use its findings to select the permitted subtask most likely to resolve the most important remaining uncertainty. Do not follow a fixed sequence. If no permitted subtask can make useful progress, stop and hand the case to a person.
 
+- **Example:** The reviewer asks to change the layout to banquet rounds. inspect_review_findings identifies one required edit. verify_against_source finds the review says 120 guests but the T1 source says 80. Because the sources conflict, the agent does not run revise_proposal_packet; it marks the status Blocked — clarification required and routes the guest-count question to T2. If verify_against_source had found no conflict, the next subtask would be revise_proposal_packet, followed by check_packet_completeness.
+
 ## 5. When to Stop or Hand Off to a Human
 
 - **Stop successfully when:** The revised packet includes every requested correction, matches the supplied event details and setup assessment, retains appropriate template defaults, contains no unsupported facts, passes the privacy check, and includes a revision summary and evidence.
-- **Hand off early when:** Required source information is missing, sources conflict, the agent cannot make progress, the inference limit or timeout is reached, or a finding affects client commitments, pricing, space, equipment, timing, or release readiness.
+- **Hand off early when:** Required source information is missing, sources conflict, the agent cannot make progress, the inference limit or timeout is reached, or a needed change goes beyond what the reviewer requested and would alter pricing, the room, the event date or time, or a client commitment.
 - **Hand off to:** Designated human proposal reviewer/event coordinator or client-facing employee. Route missing-information issues to T2 · Prepare clarification request.
 
 Stop at the first applicable budget limit or handoff condition. While awaiting review, take no further autonomous action.
@@ -101,4 +104,4 @@ Stop at the first applicable budget limit or handoff condition. While awaiting r
 - **Subtasks performed:** Permitted subtasks completed, including repeated attempts.
 - **Unresolved issues:** Remaining uncertainties or questions; use none only if no unresolved issue remains.
 - **Handoff note:** Reason for stopping, unresolved questions, and what the reviewer needs to decide; write Not applicable for a completed task.
-- **Next task or recipient:** [Complete this field]
+- **Next task or recipient:** T6 · Human-review proposal packet when the status is Revised — ready for human review; T2 · Prepare clarification request when the status is Blocked — clarification required.
