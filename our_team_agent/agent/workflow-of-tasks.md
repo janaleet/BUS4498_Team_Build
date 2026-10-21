@@ -2,7 +2,7 @@
 
 ## 1. Workflow Goal
 
-This workflow supports the goal in our completed [team charter]([Complete this field]). The workflow coordinates Review supplied event details, Identify event setup needs, Prepare template proposal, Human-review proposal packet, Revise proposal packet, Prepare clarification request, Prepare tailored proposal. Its intended result is: A proposal packet and recorded acceptable review outcome are available as evidence that this workflow run completed.
+This workflow supports the goal in our completed [team charter](../../README.md#team-charter). The workflow coordinates Review supplied event details, Identify event setup needs, Prepare template proposal, Human-review proposal packet, Revise proposal packet, Prepare clarification request, Prepare tailored proposal. Its intended result is: A proposal packet and recorded acceptable review outcome are available as evidence that this workflow run completed.
 
 ## 2. Workflow Trigger
 
