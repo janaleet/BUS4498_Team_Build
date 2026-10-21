@@ -17,7 +17,7 @@ Review proposal completeness and consistency with the supplied details; flag unr
 
 - **Input name:** Draft proposal packet
 - **Contents and format:** Completed template or tailored proposal containing the event summary, date, time, guest count, space, tables, chairs, AV equipment, layout, setup requirements, and any assumptions or unresolved items.
-- **Source:** T4 Prepare template proposal or T5 Prepare tailored proposal.
+- **Source:** T4 Prepare template proposal, T5 Prepare tailored proposal, or T7 Revise proposal packet (revised drafts).
 
 ### Input 2
 
@@ -32,12 +32,10 @@ Review proposal completeness and consistency with the supplied details; flag unr
 ### Output 1
 
 - **Output name:** Human-reviewed proposal packet and review outcome
-- **Contents and format:** The reviewed proposal packet with a completed quality checklist, supporting evidence, identified errors or missing details, privacy check, and one clear status: Ready for release, Needs revision, or Needs clarification.
+- **Contents and format:** The reviewed proposal packet with the inquiry ID, revision round number (0, 1, or 2), a completed quality checklist, supporting evidence, identified errors or missing details, a privacy check confirming no client personal information, and one clear status: Ready for release, Needs revision, or Needs clarification.
 - **Next task or recipient:** D3 Review outcome
 - **Complete when:** Every required proposal section has been reviewed, the reviewer has recorded evidence and an explicit outcome, and any needed revision or clarification has been routed to the correct task.
 
 ## 4. Planned Tools
 
-No planned tools — fully manual task.
-
-The human reviewer receives the completed proposal packet, source event details, and setup-needs assessment from T4 or T5. Within 10 minutes of receipt, they manually compare the packet with the source information and team criteria, then record the review outcome and supporting evidence directly in the proposal packet or generated Markdown as Ready for release, Needs revision, or Needs clarification. The reviewer hands the recorded outcome to D3 · Review outcome. Packets needing edits go to T7, and packets missing essential details go to T2.
+The human reviewer opens the packet in the review dashboard, which shows the draft beside the T1 event information and T3 setup assessment. Within 10 minutes of receipt, they compare the packet with the source information and team criteria, then record the outcome by choosing Ready for release, Needs revision, or Needs clarification and adding comments. Packets needing edits go to T7, and packets missing essential details go to T2. After 2 revision rounds, a further Needs revision goes to the event coordinator instead of T7. When the outcome is Ready for release, the final .docx is saved in the dashboard under its inquiry ID for the client-facing employee to download, add the client's name and contact details, and send.
