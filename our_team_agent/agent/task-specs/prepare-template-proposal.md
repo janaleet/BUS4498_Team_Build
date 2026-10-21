@@ -17,7 +17,13 @@ Prepare a proposal using an available template and the documented event setup ne
 
 - **Input name:** Event setup needs assessment
 - **Contents and format:** Markdown checklist or table showing the confirmed event details and required space, capacity, tables, chairs, AV equipment, layout, setup, teardown, and unresolved questions.
-- **Source:** Identify event setup needs; event coordinator/event proposal employee.
+- **Source:** T3 · Identify event setup needs, after D2 · Use template? finds the template suitable.
+
+### Input 2
+
+- **Input name:** Approved proposal template
+- **Contents and format:** Word (.docx) template with placeholders such as {{event_type}}, {{event_date}}, {{guest_count}}, {{room}}, {{tables}}, {{chairs}}, {{av_equipment}}, {{layout}}, and {{unresolved_items}}.
+- **Source:** our_team_agent/docs/proposal-template.docx
 
 - **If a required input is missing or invalid:** Route the request to T2 ,Prepare clarification request and notify the task owner.
 
@@ -26,21 +32,21 @@ Prepare a proposal using an available template and the documented event setup ne
 ### Output 1
 
 - **Output name:** Draft template-based event proposal
-- **Contents and format:** A completed Markdown or template-based proposal containing the confirmed event summary, date and time, guest count, recommended event space, tables, chairs, AV equipment, layout, setup requirements, unresolved items, and clearly marked assumptions. Do not retain unnecessary client personal information.
-- **Next task or recipient:** D2 Use template
-- **Complete when:** The approved template is populated with all available event and setup information, unresolved items are clearly identified, required sections are complete, and the draft is ready for the D2 template decision.
+- **Contents and format:** A completed .docx proposal with the inquiry ID, event summary, date and time, guest count, recommended room, tables, chairs, AV equipment, layout, setup requirements, unresolved items, and clearly marked assumptions. Any placeholder without a value shows [TO CONFIRM] and is listed under unresolved items. No client personal information.
+- **Next task or recipient:** T6 · Human-review proposal packet
+- **Complete when:** Every placeholder is filled or marked [TO CONFIRM], unresolved items are listed, and the draft is ready for human review.
 
 ## 4. Planned Tools
 
 ### Tool 1
 
-- **Tool name:** populate_template_proposal
-- **Input:** Event setup needs assessment and approved event proposal template
-- **Output:** Draft template-based event proposal
-- **Implementation Route:** Manually complete the approved proposal template using the event setup assessment; no file operations, functions/scripts, database queries, or web API calls.
-- **Integration approach:** Direct handoff to D2 · Use template?; no MCP integration.
-- **Role in this task:** Create an efficient, accurate proposal draft using the approved template while preserving source accuracy and client privacy.
-- **Task timeout:** 10 minutes from receipt, supporting the team goal of completing proposals within 30 minutes.
-- **Maximum retries:** 0
-- **Retry only when:** Not applicable
-- **On timeout, exhausted retries, or an error that cannot be retried:** Record the status and supporting evidence without retaining client personal information, notify the task owner/event coordinator, and route the item to D2 or T5 as appropriate.
+- **Tool name:** fill_proposal_template
+- **Input:** Event setup needs assessment and approved proposal template
+- **Output:** Draft template-based event proposal (.docx)
+- **Implementation Route:** Function/script. Code uses a Word library (such as python-docx) to place each value into its matching placeholder. No AI model is used.
+- **Integration approach:** Runs inside the app; the draft goes to T6 in the review dashboard. No MCP integration.
+- **Role in this task:** Produce a consistent proposal draft quickly from the documented setup.
+- **Task timeout:** 15 seconds
+- **Maximum retries:** 1
+- **Retry only when:** Saving the file fails because of a temporary write error.
+- **On timeout, exhausted retries, or an error that cannot be retried:** Record the status under the inquiry ID, notify the event coordinator, and route the item to T5 · Prepare tailored proposal.
