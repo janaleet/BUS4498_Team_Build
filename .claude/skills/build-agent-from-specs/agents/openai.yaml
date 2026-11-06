@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build Agent from Specs"
+  short_description: "Build agents from specs and the plans, in approved feature steps"
+  default_prompt: "Use $build-agent-from-specs to collect my plans (hosting, memory, permission, and the test plan once my agent runs) from my agent's runtime folder, treat them as the standard over my specifications, confirm the design, offer task-specific AI model choices even when a model is named, build in reviewed feature groups, build the test mode my test plan describes, verify with its cases on the models it names, write HANDOFF.md from it, and publish only after final review."
