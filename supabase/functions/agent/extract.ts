@@ -54,13 +54,17 @@ export type ExtractionResult =
   | { ok: true; fields: Record<string, unknown>; attempts: number; inputTokens: number; outputTokens: number }
   | { ok: false; reason: string; attempts: number; inputTokens: number; outputTokens: number };
 
-/** Called before each attempt; returns false when the daily AI limit is reached. */
+/** Called before each attempt; returns false when Paused or a daily AI limit is reached. */
 export type BeforeCall = () => Promise<boolean>;
+/** Called after each answered attempt with that attempt's token counts. */
+export type AfterCall = (inputTokens: number, outputTokens: number) => Promise<void>;
 
 export async function extractEventDetails(
   apiKey: string,
   deidentifiedText: string,
   beforeCall: BeforeCall,
+  afterCall: AfterCall = async () => {},
+  model: string = EXTRACTION_MODEL,
 ): Promise<ExtractionResult> {
   const client = new Anthropic({ apiKey, timeout: TIMEOUT_MS, maxRetries: 0 });
   let inputTokens = 0;
@@ -69,11 +73,11 @@ export async function extractEventDetails(
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     if (!(await beforeCall())) {
-      return { ok: false, reason: "daily_limit", attempts: attempt - 1, inputTokens, outputTokens };
+      return { ok: false, reason: "ai_limit", attempts: attempt - 1, inputTokens, outputTokens };
     }
     try {
       const response = await client.messages.create({
-        model: EXTRACTION_MODEL,
+        model,
         max_tokens: 4000,
         system: SYSTEM,
         output_config: { effort: "low", format: { type: "json_schema", schema: SCHEMA } },
@@ -81,6 +85,7 @@ export async function extractEventDetails(
       });
       inputTokens += response.usage.input_tokens;
       outputTokens += response.usage.output_tokens;
+      await afterCall(response.usage.input_tokens, response.usage.output_tokens);
 
       if (response.stop_reason === "refusal") {
         return { ok: false, reason: "the model declined this inquiry", attempts: attempt, inputTokens, outputTokens };

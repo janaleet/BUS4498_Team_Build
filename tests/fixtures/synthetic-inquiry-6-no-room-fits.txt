@@ -1,0 +1,14 @@
+SYNTHETIC TEST DATA - made-up company and event. Contact details are placeholders.
+
+Subject: Company holiday party – 280 guests
+
+Hello,
+
+Harborview Credit Union would like to hold its company holiday party on Friday, December 3, 2027, from 6:00 PM to 10:00 PM. We expect 280 guests and want a seated dinner with round tables (banquet style). Music through your speaker system and a microphone for a few short speeches would be great.
+
+Please send a proposal when you can.
+
+Best,
+[NAME]
+Harborview Credit Union
+[EMAIL]

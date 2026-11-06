@@ -4,14 +4,9 @@
   const ctx = await requireStaff(page);
   renderHeader("new-inquiry.html", ctx);
   if (!ctx || !ctx.staff) return;
-  if (ctx.staff.role !== "employee") {
-    page.replaceChildren(notice("warn", "Employees only", "Only employees can submit inquiries. You can still view every inquiry on the dashboard."));
-    return;
-  }
 
   const message = document.getElementById("message");
   const raw = document.getElementById("raw");
-  const file = document.getElementById("file");
   const step2 = document.getElementById("step-2");
   const cleaned = document.getElementById("cleaned");
   const confirm = document.getElementById("confirm");
@@ -30,20 +25,6 @@
     byHandButton.disabled = !ready;
   }
 
-  file.addEventListener("change", () => {
-    const chosen = file.files[0];
-    message.replaceChildren();
-    if (!chosen) return;
-    if (chosen.size > 100 * 1024) {
-      message.replaceChildren(notice("bad", "File too large", "Choose a text file under 100 KB."));
-      file.value = "";
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => { raw.value = String(reader.result); resetStep2(); };
-    reader.onerror = () => message.replaceChildren(notice("bad", "Could not read the file", "Paste the text instead."));
-    reader.readAsText(chosen);
-  });
   raw.addEventListener("input", resetStep2);
   confirm.addEventListener("change", updateButtons);
   cleaned.addEventListener("input", updateButtons);
@@ -51,23 +32,26 @@
   checkButton.addEventListener("click", async () => {
     message.replaceChildren();
     if (raw.value.trim() === "") {
-      message.replaceChildren(notice("bad", "The inquiry is empty", "Paste or upload the inquiry text first."));
+      message.replaceChildren(notice("bad", "The inquiry is empty", "Paste the inquiry text first."));
       return;
     }
     checkButton.disabled = true;
     checkButton.textContent = "Checking…";
-    const result = await callFunction("intake-inquiry", { action: "preview", text: raw.value });
+    const result = await callFunction("agent", { action: "preview", text: raw.value });
     checkButton.disabled = false;
     checkButton.textContent = "Check for personal details";
     if (!result.ok) {
-      message.replaceChildren(notice("bad", "Not checked", result.error));
+      message.replaceChildren(notice("bad", "Not checked", result.error || (result.reasons || []).join(" ")));
       return;
     }
     cleaned.value = result.text;
     const labels = { NAME: "Names", EMAIL: "Email addresses", PHONE: "Phone numbers", ADDRESS: "Street addresses" };
     document.getElementById("counts").replaceChildren(...Object.entries(labels).map(([key, label]) =>
       el("li", {}, el("span", { class: "badge neutral", text: `${label}: ${result.replaced[key] || 0}` }))));
-    document.getElementById("warnings").replaceChildren(...(result.warnings || []).map((w) => notice("warn", "Check by eye", w)));
+    document.getElementById("warnings").replaceChildren(
+      ...(result.warnings || []).map((w) => notice("warn", "Check by eye", w)),
+      ...(result.flags || []).map((line) => notice("warn", "This line tries to instruct the agent",
+        `"${line}" — it will be flagged for a person and not followed.`)));
     confirm.checked = false;
     step2.hidden = false;
     updateButtons();
@@ -81,13 +65,14 @@
     const button = byHand ? byHandButton : submitButton;
     const original = button.textContent;
     button.textContent = byHand ? "Saving…" : "Reading the inquiry (up to a minute)…";
-    const result = await callFunction("intake-inquiry", {
+    const result = await callFunction("agent", {
       action: "submit", text: cleaned.value, confirmed: confirm.checked, by_hand: byHand,
     });
     button.textContent = original;
     if (!result.ok) {
       updateButtons();
-      message.replaceChildren(notice("bad", "Not submitted", result.error));
+      const title = result.status === "paused" ? "The agent is paused" : "Not submitted";
+      message.replaceChildren(notice("bad", title, result.error || (result.reasons || []).join(" ")));
       return;
     }
     location.href = `inquiry.html?id=${encodeURIComponent(result.inquiry_id)}`;

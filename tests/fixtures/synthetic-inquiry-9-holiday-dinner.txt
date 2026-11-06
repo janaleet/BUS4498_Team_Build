@@ -1,0 +1,12 @@
+SYNTHETIC TEST DATA - made-up company and event. Contact details are placeholders.
+
+Subject: Holiday dinner for our team
+
+Hello,
+
+Pacific Tide Dental would like to host a holiday party on Friday, December 17, 2027, from 6:30 PM to 9:30 PM. We'll have 80 people for the holiday dinner, seated at round tables (banquet layout). One microphone for a toast would be helpful.
+
+Kind regards,
+[NAME]
+Pacific Tide Dental
+[PHONE]

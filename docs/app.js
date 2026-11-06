@@ -29,10 +29,9 @@
     nextStep: {
       extracting: "Reading the inquiry",
       enter_details_by_hand: "Enter the details by hand",
-      t2_clarification: "Task 2 – ask the client for missing details (coming in Group 2)",
-      t3_setup_needs: "Task 3 – work out setup needs (coming in Group 3)",
+      t2_clarification: "Task 2 – ask the client for missing details (coming in Group 3)",
+      t3_setup_needs: "Task 3 – work out setup needs (coming in Group 2)",
     },
-    role: { employee: "Employee", reviewer: "Reviewer", coordinator: "Event coordinator" },
   };
 
   /** Build an element. Text children are added as text, never as HTML. */
@@ -77,27 +76,92 @@
       location.replace("index.html");
       return null;
     }
-    const { data: staff, error } = await sb.from("staff_members").select("display_name, role").maybeSingle();
+    const user = data.session.user;
+    const { data: staff, error } = await sb.from("staff_members")
+      .select("display_name, is_owner").eq("user_id", user.id).maybeSingle();
     if (error || !staff) {
-      target.replaceChildren(notice("bad", "No staff role",
-        "You are signed in, but no staff role is set for your account. Ask the project owner to add you."));
-      return { user: data.session.user, staff: null };
+      target.replaceChildren(notice("bad", "Not on the staff list",
+        "You are signed in, but your account is not on the staff list. Ask the project owner to add you."));
+      return { user, staff: null };
     }
-    return { user: data.session.user, staff };
+    await showPausedBanner();
+    return { user, staff };
+  }
+
+  /** Read one setting row (signed-in staff only). */
+  async function readSetting(key) {
+    const { data } = await sb.from("settings").select("key, label, value, reason, changed_at").eq("key", key).maybeSingle();
+    return data;
+  }
+
+  /** Show a banner on every page while the agent is paused. */
+  async function showPausedBanner() {
+    const paused = await readSetting("paused");
+    const slot = document.getElementById("paused-banner") || (() => {
+      const div = el("div", { id: "paused-banner" });
+      const main = document.querySelector("main");
+      if (main) main.prepend(div);
+      return div;
+    })();
+    slot.replaceChildren(paused && paused.value === true
+      ? notice("warn", "The agent is paused", `It does nothing and calls no AI until a reviewer switches Paused off in Settings. Reason: ${paused.reason}`)
+      : "");
   }
 
   function renderHeader(current, ctx) {
     const header = document.querySelector("header.top .inner");
     if (!header) return;
     const link = (href, text) => el("a", { href, "aria-current": current === href ? "page" : null, text });
+    const isStaff = ctx && ctx.staff;
     const nav = el("nav", { "aria-label": "Main" }, link("dashboard.html", "Dashboard"),
-      ctx && ctx.staff && ctx.staff.role === "employee" ? link("new-inquiry.html", "New inquiry") : null);
+      isStaff ? link("new-inquiry.html", "New inquiry") : null,
+      isStaff ? link("settings.html", "Settings") : null);
     const who = ctx && ctx.user
       ? el("span", { class: "who" },
-          `${ctx.user.email}${ctx.staff ? ` · ${LABELS.role[ctx.staff.role] || ctx.staff.role}` : ""} · `,
+          `${isStaff ? ctx.staff.display_name : ctx.user.email} · `,
           el("button", { class: "link", type: "button", onclick: signOut, text: "Sign out" }))
       : null;
     header.replaceChildren(el("a", { class: "brand", href: "dashboard.html", text: "JEvents Proposals" }), nav, who);
+  }
+
+  /**
+   * "Report a problem" button for one decision. Saves the inquiry, what the report
+   * is about, a note, who, and when. A report never changes a decision or a switch.
+   */
+  function reportProblemButton(inquiryId, about) {
+    const button = el("button", { type: "button", class: "secondary small", text: "Report a problem" });
+    button.addEventListener("click", () => {
+      const status = el("div");
+      const note = el("textarea", { id: `report-note-${inquiryId}`, class: "short", maxlength: "2000",
+        placeholder: "What looks wrong? For example: the guest count should be 45, not 54." });
+      const dialog = el("dialog", { class: "report", "aria-labelledby": "report-title" },
+        el("h2", { id: "report-title", text: `Report a problem · ${inquiryId}` }),
+        el("p", { class: "hint", text: `About: ${about}. A report doesn't change the decision; a reviewer reads it.` }),
+        el("label", { for: note.id, text: "What's wrong" }), note, status,
+        el("div", { class: "actions" },
+          el("button", { type: "button", text: "Send report", onclick: async (event) => {
+            const send = event.currentTarget;
+            if (note.value.trim().length < 3) {
+              status.replaceChildren(notice("bad", "Add a short note", "Say what looks wrong (at least 3 characters)."));
+              return;
+            }
+            send.disabled = true;
+            const { error } = await sb.from("problem_reports").insert({ inquiry_id: inquiryId, about, note: note.value.trim() });
+            send.disabled = false;
+            if (error) {
+              status.replaceChildren(notice("bad", "Not saved", "Try again. If it keeps failing, tell your teammate."));
+              return;
+            }
+            dialog.close();
+            dialog.remove();
+            button.replaceWith(el("span", { class: "badge neutral", text: "Problem reported" }));
+          } }),
+          el("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => { dialog.close(); dialog.remove(); } })));
+      document.body.append(dialog);
+      dialog.showModal();
+      note.focus();
+    });
+    return button;
   }
 
   async function signOut() {
@@ -131,5 +195,8 @@
     return result;
   }
 
-  window.JEvents = { sb, connected, LABELS, el, notice, formatDateTime, requireStaff, renderHeader, callFunction, showNotConnected };
+  window.JEvents = {
+    sb, connected, LABELS, el, notice, formatDateTime, requireStaff, renderHeader, callFunction,
+    showNotConnected, readSetting, showPausedBanner, reportProblemButton,
+  };
 })();

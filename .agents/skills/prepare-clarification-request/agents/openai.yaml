@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prepare Clarification Request"
+  short_description: "Draft the follow-up asking an event client for missing details (T2)"
+  default_prompt: "Use $prepare-clarification-request to draft a clarification request for this inquiry: one numbered question per missing or conflicting detail, the inquiry ID in the subject and body, a 3-business-day reply deadline, and no client personal information."

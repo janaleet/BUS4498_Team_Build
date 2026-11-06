@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settings · JEvents Proposals</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</head>
+<body>
+  <header class="top"><div class="inner"></div></header>
+  <main id="page">
+    <h1>Settings</h1>
+    <p class="lead">Switches and limits the agent reads on every run. Every change needs a reason and is recorded with who and when.</p>
+    <div id="message"></div>
+    <div id="settings"><p class="empty">Loading…</p></div>
+    <section class="card">
+      <h2 style="margin-top:0">Problem reports</h2>
+      <div id="reports"><p class="empty">Loading…</p></div>
+    </section>
+    <section class="card">
+      <h2 style="margin-top:0">Change history</h2>
+      <div id="history"><p class="empty">Loading…</p></div>
+    </section>
+  </main>
+  <script src="settings.js"></script>
+</body>
+</html>

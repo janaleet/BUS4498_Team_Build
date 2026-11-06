@@ -167,3 +167,28 @@ pre.source {
   .stack-sm td { display: block; border: none; padding: 4px 0; }
   .stack-sm td[data-label]::before { content: attr(data-label) ": "; font-weight: 600; color: var(--muted); }
 }
+
+/* Small secondary buttons, short text boxes, the report dialog */
+button.small, .button.small { padding: 4px 10px; font-size: 14px; }
+textarea.short { min-height: 110px; font-family: inherit; font-size: 15px; }
+dialog.report {
+  width: min(520px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  padding: 20px;
+}
+dialog.report h2 { margin-top: 0; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+.switch-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+ul.plain { list-style: none; padding: 0; margin: 0; }
+ul.plain li { padding: 6px 0; border-bottom: 1px solid var(--border); }
+ul.plain li:last-child { border-bottom: none; }
+
+/* Subtle motion: short fades, off for anyone who asks for reduced motion */
+.notice, .card, dialog.report[open] { animation: fade-in 160ms ease-out; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

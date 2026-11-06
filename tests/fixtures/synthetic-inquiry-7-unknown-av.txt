@@ -1,0 +1,12 @@
+SYNTHETIC TEST DATA - made-up company and event. Contact details are placeholders.
+
+Subject: Training session – need a teleprompter
+
+Hi,
+
+Summit Ridge Software is running a conference and training session for 40 staff on Thursday, October 14, 2027, from 8:30 AM to 4:30 PM, classroom style. Besides the usual projector and screen, our presenter needs a teleprompter and a confidence monitor at the front of the room.
+
+Thanks,
+[NAME]
+Summit Ridge Software
+[PHONE]

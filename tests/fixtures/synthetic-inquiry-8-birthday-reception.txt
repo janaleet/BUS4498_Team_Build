@@ -1,0 +1,11 @@
+SYNTHETIC TEST DATA - made-up event. Contact details are placeholders.
+
+Subject: Birthday party booking
+
+Hi there,
+
+I'd like to book a space for a birthday party on Saturday, April 10, 2027, from 2:00 PM to 5:00 PM. There will be 30 guests and we'd like a reception layout so people can mingle. Music through a speaker would be nice.
+
+Thank you!
+[NAME]
+[EMAIL]
