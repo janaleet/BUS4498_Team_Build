@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · JEvents Proposals</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</head>
+<body>
+  <main>
+    <div class="card narrow">
+      <h1>JEvents Proposals</h1>
+      <p class="lead">Sign in with the account the project owner created for you.</p>
+      <div id="message"></div>
+      <form id="sign-in">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="username" required>
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" required>
+        <div class="actions">
+          <button type="submit" id="submit">Sign in</button>
+        </div>
+      </form>
+      <p class="hint">There is no sign-up. New accounts are added by the project owner in Supabase.</p>
+    </div>
+  </main>
+  <script src="signin.js"></script>
+</body>
+</html>

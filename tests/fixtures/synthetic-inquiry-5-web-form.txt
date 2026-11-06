@@ -1,0 +1,14 @@
+SYNTHETIC TEST DATA - made-up web form submission.
+
+Name: Marcus Lee
+Email: marcus.lee@example.net
+Phone: +1 415 555 0177
+Address: 88 Ocean View Road, Morro Bay, CA 93442
+Organization: Harbor Arts Collective
+Event type: Conference or training
+Event date: 2027-05-04
+Start time: 8:30 AM
+End time: 4:00 PM
+Guests: 110
+Layout: Theater
+Notes: Mr. Lee would like a livestream of the keynote.

@@ -1,0 +1,13 @@
+SYNTHETIC TEST DATA - made-up people, phone numbers, and addresses.
+
+Subject: Holiday party for our sales team
+
+Hi,
+
+I'm Priya Shah, the office manager at Bluewater Logistics. We'd like to hold our holiday party on Friday, December 10, 2027, from 6:00 PM to 10:00 PM for 70 guests in a reception layout. Catering will be needed. My assistant Daniel Ortiz will handle the deposit, so please copy him too.
+
+You can reach me at priya.shah@example.com or (805) 555-0142, and Daniel at daniel.ortiz@example.org or 805.555.0199. Our office is at 1450 Foothill Blvd, Suite 210, San Luis Obispo, CA 93405.
+
+Thanks,
+Priya Shah
+Bluewater Logistics

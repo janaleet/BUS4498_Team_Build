@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New inquiry · JEvents Proposals</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</head>
+<body>
+  <header class="top"><div class="inner"></div></header>
+  <main id="page">
+    <h1>New inquiry</h1>
+    <p class="lead">Task 1 · Review supplied event details. Personal details are removed before anything is saved or sent to the AI.</p>
+    <div id="message"></div>
+
+    <section class="card" id="step-1">
+      <h2 style="margin-top:0">1. Paste or upload the inquiry</h2>
+      <label for="file">Upload a text file <span class="hint">(.txt, up to 100 KB; the file itself is not stored)</span></label>
+      <input id="file" type="file" accept=".txt,text/plain">
+      <label for="raw">Or paste the inquiry</label>
+      <textarea id="raw" spellcheck="false" placeholder="Paste the client's email, web form, or notes here."></textarea>
+      <div class="actions">
+        <button type="button" id="check">Check for personal details</button>
+        <span class="hint">Nothing is saved at this step.</span>
+      </div>
+    </section>
+
+    <section class="card" id="step-2" hidden>
+      <h2 style="margin-top:0">2. Check the cleaned text</h2>
+      <p>These were replaced:</p>
+      <ul class="counts" id="counts"></ul>
+      <div id="warnings"></div>
+      <label for="cleaned">Cleaned text <span class="hint">(fix anything that still identifies a person, such as a name in the middle of a sentence)</span></label>
+      <textarea id="cleaned" spellcheck="false"></textarea>
+      <label class="check" for="confirm">
+        <input id="confirm" type="checkbox">
+        <span>I checked the cleaned text: no client names, email addresses, phone numbers, or street addresses remain.</span>
+      </label>
+      <div class="actions">
+        <button type="button" id="submit" disabled>Submit and read with AI</button>
+        <button type="button" id="by-hand" class="secondary" disabled>Submit and enter details by hand</button>
+      </div>
+    </section>
+  </main>
+  <script src="new-inquiry.js"></script>
+</body>
+</html>
