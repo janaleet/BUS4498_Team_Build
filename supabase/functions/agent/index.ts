@@ -1,6 +1,6 @@
 // Edge Function: agent
-// Carries out T1 · Review supplied event details and the D1 decision
-// (Sufficient event details?). Later groups add the next tasks here.
+// Carries out T1 · Review supplied event details, D1 (Sufficient event details?),
+// T3 · Identify event setup needs, and D2 (Use template?). Later groups add the next tasks.
 //
 // GET  -> status check; calls no AI and saves nothing.
 // POST -> JSON body:
@@ -11,17 +11,27 @@
 //     { "action": "submit", "text", "confirmed": true, "by_hand"?: bool }
 //     { "action": "manual", "inquiry_id", "fields" }     six details typed by an employee
 // Every answer has ok, status (one word), reasons, dry_run, ms, and usage.
+// Final statuses: template (-> T4), tailored (-> T5), clarify (-> T2), held (a person decides),
+// paused, refused.
 import { createClient } from "npm:@supabase/supabase-js@2.117.2";
 import { PersonalDetailsError, removePersonalDetails } from "./pii.js";
 import { checkEventDetails, LAYOUTS, REQUIRED_FIELDS } from "./d1.js";
 import { EXTRACTION_MODEL, extractEventDetails } from "./extract.ts";
+import { FLAG_MODEL, flagSetupQuestions } from "./flag.ts";
+import { assessSetup, setupReasons } from "./setup.js";
 import { findInstructionLikeText } from "./flags.js";
 
 const MAX_TEXT_LENGTH = 20_000;
 // Models test mode may compare. Add the models runtime/test-plan.md lists under
 // "Models to compare" once the test plan is written.
 const TEST_MODELS = [EXTRACTION_MODEL];
-const STATUSES = ["sufficient", "missing", "held", "paused", "refused"];
+const STATUSES = ["template", "tailored", "clarify", "held", "paused", "refused"];
+const NEXT_STEP: Record<string, string> = {
+  template: "t4_template_proposal",
+  tailored: "t5_tailored_proposal",
+  clarify: "t2_clarification",
+  held: "held_setup_shortage",
+};
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -71,8 +81,8 @@ async function readSettings() {
   };
 }
 
-async function alertCoordinator(inquiryId: string | null, problem: string) {
-  const { error } = await db.from("coordinator_alerts").insert({ inquiry_id: inquiryId, task: "T1", problem });
+async function alertCoordinator(inquiryId: string | null, task: string, problem: string) {
+  const { error } = await db.from("coordinator_alerts").insert({ inquiry_id: inquiryId, task, problem });
   if (error) console.error("coordinator alert not saved", error.message);
 }
 
@@ -94,18 +104,18 @@ function clean(text: unknown): { result?: Cleaned; refused?: string; held?: stri
   }
 }
 
-/** Plain-language reasons for the D1 result. */
-function d1Reasons(decision: ReturnType<typeof checkEventDetails>): string[] {
-  if (decision.d1_result === "sufficient") {
-    return ["All six required details were found and none conflict, so the next step is Task 3 (setup needs)."];
-  }
-  return decision.missing_fields.map((name: string) => {
-    const field = decision.fields[name] ?? {};
-    const label = name.replace(/_/g, " ");
-    return field.status === "conflicting"
-      ? `The ${label} is conflicting${field.value ? ` ("${field.value}")` : ""}; the client must give one value.`
-      : `The ${label} is missing.`;
-  });
+/** Plain-language reasons for a D1 result of "missing". */
+function d1MissingReasons(decision: ReturnType<typeof checkEventDetails>): string[] {
+  return [
+    ...decision.missing_fields.map((name: string) => {
+      const field = decision.fields[name] ?? {};
+      const label = name.replace(/_/g, " ");
+      return field.status === "conflicting"
+        ? `The ${label} is conflicting${field.value ? ` ("${field.value}")` : ""}; the client must give one value.`
+        : `The ${label} is missing.`;
+    }),
+    "Next: Task 2, a clarification request to the client.",
+  ];
 }
 
 function checkedList(settings: Awaited<ReturnType<typeof readSettings>>, model: string | null, replaced?: Record<string, number>) {
@@ -121,26 +131,17 @@ function checkedList(settings: Awaited<ReturnType<typeof readSettings>>, model: 
   return list;
 }
 
-/** Run extract_event_details with the daily limits and token counting. */
-async function runExtraction(text: string, inquiryId: string | null, dryRun: boolean, model: string) {
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
-  const usage: Usage = { model, input_tokens: 0, output_tokens: 0 };
-  if (!apiKey) {
-    return { extraction: { ok: false as const, reason: "missing_key", attempts: 0, inputTokens: 0, outputTokens: 0 }, usage };
-  }
+/** Reserve each AI call against the daily limits, and record its tokens. */
+function aiHooks(task: string, inquiryId: string | null, dryRun: boolean, model: string, usage: Usage) {
   let usageId: number | null = null;
   const beforeCall = async () => {
-    const { data, error } = await db.rpc("reserve_ai_call", {
-      p_task: "T1 extract_event_details",
-      p_inquiry_id: inquiryId,
-      p_model: model,
-      p_dry_run: dryRun,
-    });
+    const { data, error } = await db.rpc("reserve_ai_call", { p_task: task, p_inquiry_id: inquiryId, p_model: model, p_dry_run: dryRun });
     if (error) throw new Error(`AI limit check failed: ${error.message}`);
     usageId = data ?? null;
     return usageId !== null;
   };
   const afterCall = async (inputTokens: number, outputTokens: number) => {
+    usage.model = model;
     usage.input_tokens += inputTokens;
     usage.output_tokens += outputTokens;
     if (usageId !== null) {
@@ -148,20 +149,130 @@ async function runExtraction(text: string, inquiryId: string | null, dryRun: boo
       if (error) console.error("token count not saved", error.message);
     }
   };
+  return { beforeCall, afterCall };
+}
+
+/** T1 extract_event_details with the daily limits and token counting. */
+async function runExtraction(text: string, inquiryId: string | null, dryRun: boolean, model: string, usage: Usage) {
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+  usage.model = model;
+  if (!apiKey) return { ok: false as const, reason: "missing_key", attempts: 0, inputTokens: 0, outputTokens: 0 };
+  const { beforeCall, afterCall } = aiHooks("T1 extract_event_details", inquiryId, dryRun, model, usage);
   let extraction: Awaited<ReturnType<typeof extractEventDetails>>;
   try {
     extraction = await extractEventDetails(apiKey, text, beforeCall, afterCall, model);
   } catch (error) {
     extraction = { ok: false, reason: error instanceof Error ? error.message : String(error), attempts: 0, inputTokens: 0, outputTokens: 0 };
   }
-  console.log(JSON.stringify({ inquiry: inquiryId, dry_run: dryRun, extraction: extraction.ok ? "ok" : extraction.reason, attempts: extraction.attempts, input_tokens: usage.input_tokens, output_tokens: usage.output_tokens }));
-  return { extraction, usage };
+  console.log(JSON.stringify({ inquiry: inquiryId, dry_run: dryRun, extraction: extraction.ok ? "ok" : extraction.reason, attempts: extraction.attempts }));
+  return extraction;
 }
 
 function extractionHeldReason(reason: string) {
   if (reason === "ai_limit") return "The daily AI limit is reached or the agent is paused, so the AI was not called. Enter the six details by hand.";
   if (reason === "missing_key") return "The AI key is not set up yet (Supabase → Edge Functions → Secrets → ANTHROPIC_API_KEY). Enter the six details by hand.";
   return `The AI could not read this inquiry (${reason}). Enter the six details by hand.`;
+}
+
+/**
+ * T3 + D2: read the active rooms, let the AI sort the client's AV and special requests,
+ * then decide room, tables, chairs, AV and the route in code. Saves the assessment
+ * unless dryRun. Returns { assessment, reasons, checked } or { held } when rooms can't be read.
+ */
+async function runSetup(
+  fields: Record<string, { value: string; status: string }>,
+  inquiryId: string | null,
+  submissionId: number | null,
+  dryRun: boolean,
+  model: string,
+  usage: Usage,
+) {
+  const { data: rooms, error } = await db.from("rooms").select("*").eq("active", true);
+  if (error || !rooms || rooms.length === 0) {
+    const reason = "The room list could not be read, so setup needs were not worked out. The event coordinator was told.";
+    if (!dryRun) {
+      await alertCoordinator(inquiryId, "T3", `Room list unreadable: ${error?.message ?? "no active rooms"}`);
+      if (inquiryId) await db.from("inquiries").update({ next_step: NEXT_STEP.held }).eq("id", inquiryId);
+    }
+    return { held: reason };
+  }
+
+  const text = (name: string) => (fields[name]?.status === "found" ? String(fields[name].value) : "");
+  const hasRequests = Boolean(text("av_requests") || text("special_requests") || text("catering"));
+  const empty = { ok: true as const, av_items: [], special_requests: [], venue_catering_requested: false, questions: [], attempts: 0 };
+  let requests: Awaited<ReturnType<typeof flagSetupQuestions>> = empty;
+  let flagFailure = "";
+  if (hasRequests) {
+    const draft = assessSetup(fields, rooms, empty);
+    const setupList = [
+      draft.room ? `Room: ${draft.room} (${draft.layout} ${draft.room_capacity})` : "Room: none fits",
+      ...draft.tables.map((t: { item: string; qty: number }) => `${t.qty} × ${t.item}`),
+      draft.chairs ? `${draft.chairs.qty} chairs` : "",
+      ...draft.av.filter((a: { status: string }) => a.status === "needed").map((a: { item: string; qty: number }) => `${a.qty} × ${a.item}`),
+    ].filter(Boolean).join("; ");
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+    if (!apiKey) {
+      requests = { ok: false, reason: "missing_key", attempts: 0 };
+    } else {
+      const { beforeCall, afterCall } = aiHooks("T3 flag_setup_questions", inquiryId, dryRun, model, usage);
+      try {
+        requests = await flagSetupQuestions(apiKey, {
+          av_requests: text("av_requests"),
+          special_requests: text("special_requests"),
+          catering: text("catering"),
+          event_type: text("event_type"),
+          setup_list: setupList,
+        }, beforeCall, afterCall, model);
+      } catch (e) {
+        requests = { ok: false, reason: e instanceof Error ? e.message : String(e), attempts: 0 };
+      }
+    }
+    if (!requests.ok) flagFailure = requests.reason;
+  }
+
+  const assessment = assessSetup(fields, rooms, requests.ok ? requests : null);
+  const reasons = setupReasons(assessment);
+  const checked = [
+    `Rooms: ${rooms.length} active room(s)${rooms.some((r: { is_example: boolean }) => r.is_example) ? " (example venue data)" : ""}`,
+    "Rules: room choice, tables, chairs, AV, template list (setup-and-routing-rules.md, sections 4–5)",
+    hasRequests
+      ? (requests.ok ? `AI model for special requests: ${model}` : `Special requests not checked (${flagFailure})`)
+      : "No AV or special requests to check, so the AI was not called",
+  ];
+  console.log(JSON.stringify({ inquiry: inquiryId, dry_run: dryRun, route: assessment.route, flag: hasRequests ? (requests.ok ? "ok" : flagFailure) : "skipped" }));
+
+  if (!dryRun && inquiryId && submissionId) {
+    const { error: saveError } = await db.from("setup_assessments").insert({
+      inquiry_id: inquiryId,
+      submission_id: submissionId,
+      event_type: assessment.event_type,
+      guest_count: assessment.guest_count,
+      layout: assessment.layout,
+      room: assessment.room,
+      room_capacity: assessment.room_capacity,
+      tables: assessment.tables,
+      chairs: assessment.chairs,
+      av: assessment.av,
+      setup_teardown: assessment.setup_teardown,
+      unresolved: assessment.unresolved,
+      assumptions: assessment.assumptions,
+      shortages: assessment.shortages,
+      questions: assessment.questions,
+      on_template_list: assessment.on_template_list,
+      fits_standard_layout: assessment.fits_standard_layout,
+      special_requests: assessment.special_requests,
+      special_requests_checked: assessment.special_requests_checked,
+      route: assessment.route,
+      model: hasRequests && requests.ok ? model : null,
+      checked,
+    });
+    if (saveError) throw new Error(`setup assessment not saved: ${saveError.message}`);
+    const { error: stepError } = await db.from("inquiries").update({ next_step: NEXT_STEP[assessment.route] }).eq("id", inquiryId);
+    if (stepError) throw new Error(`inquiry not updated: ${stepError.message}`);
+    if (assessment.route === "held") await alertCoordinator(inquiryId, "T3", `Setup held: ${assessment.shortages.join(" ")}`);
+    if (flagFailure) await alertCoordinator(inquiryId, "T3", `Special requests not checked (${flagFailure}); review in T6.`);
+  }
+  return { assessment, reasons, checked };
 }
 
 // ---------------------------------------------------------------------------
@@ -183,22 +294,33 @@ async function handleDryRun(started: number, body: Record<string, unknown>) {
   const { text, replaced } = cleaned.result!;
   const flags = findInstructionLikeText(text);
   const flagReasons = flags.map((line) => `Flagged for a person, not followed: "${line}"`);
+  const usage = noUsage();
+  const checked = checkedList(settings, model, replaced);
 
-  const { extraction, usage } = await runExtraction(text, null, true, model);
+  const extraction = await runExtraction(text, null, true, model, usage);
   if (!extraction.ok) {
-    return answer(started, 200, { ...base, ok: true, status: "held", reasons: [extractionHeldReason(extraction.reason), ...flagReasons], usage, flags, checked: checkedList(settings, model, replaced) });
+    return answer(started, 200, { ...base, ok: true, status: "held", reasons: [extractionHeldReason(extraction.reason), ...flagReasons], usage, flags, checked });
   }
   const decision = checkEventDetails(extraction.fields, text);
+  if (decision.d1_result === "missing") {
+    return answer(started, 200, { ...base, ok: true, status: "clarify", reasons: [...d1MissingReasons(decision), ...flagReasons], usage, d1_result: "missing", fields: decision.fields, missing_fields: decision.missing_fields, flags, checked });
+  }
+  const setup = await runSetup(decision.fields, null, null, true, model, usage);
+  if ("held" in setup) {
+    return answer(started, 200, { ...base, ok: true, status: "held", reasons: [setup.held, ...flagReasons], usage, d1_result: "sufficient", fields: decision.fields, flags, checked });
+  }
   return answer(started, 200, {
     ...base,
     ok: true,
-    status: decision.d1_result,
-    reasons: [...d1Reasons(decision), ...flagReasons],
+    status: setup.assessment.route,
+    reasons: [...setup.reasons, ...flagReasons],
     usage,
+    d1_result: "sufficient",
     fields: decision.fields,
     missing_fields: decision.missing_fields,
+    setup: setup.assessment,
     flags,
-    checked: checkedList(settings, model, replaced),
+    checked: [...checked, ...setup.checked],
   });
 }
 
@@ -224,7 +346,14 @@ async function saveDecision(
     .update({ d1_result: decision.d1_result, next_step: nextStep })
     .eq("id", inquiryId);
   if (inquiryError) throw new Error(`inquiry not updated: ${inquiryError.message}`);
-  return nextStep;
+}
+
+/** After D1 is saved: run T3 + D2 when the details are sufficient; return status and reasons. */
+async function afterD1(inquiryId: string, submissionId: number, decision: ReturnType<typeof checkEventDetails>, usage: Usage) {
+  if (decision.d1_result === "missing") return { status: "clarify", reasons: d1MissingReasons(decision), next_step: NEXT_STEP.clarify };
+  const setup = await runSetup(decision.fields, inquiryId, submissionId, false, FLAG_MODEL, usage);
+  if ("held" in setup) return { status: "held", reasons: [setup.held], next_step: NEXT_STEP.held };
+  return { status: setup.assessment.route, reasons: setup.reasons, next_step: NEXT_STEP[setup.assessment.route] };
 }
 
 async function handleSubmit(started: number, body: Record<string, unknown>, userId: string) {
@@ -253,14 +382,15 @@ async function handleSubmit(started: number, body: Record<string, unknown>, user
   if (startError || !startedRows?.length) throw new Error(`inquiry not created: ${startError?.message}`);
   const { inquiry_id: inquiryId, submission_id: submissionId } = startedRows[0];
   const flagReasons = flags.map((line) => `Flagged for a person, not followed: "${line}"`);
-  if (flags.length) await alertCoordinator(inquiryId, `Inquiry text tried to instruct the agent: ${flags.join(" / ")}`);
+  if (flags.length) await alertCoordinator(inquiryId, "T1", `Inquiry text tried to instruct the agent: ${flags.join(" / ")}`);
 
   if (byHand) {
     await db.from("inquiry_submissions").update({ checked: checkedList(settings, null, replaced) }).eq("id", submissionId);
     return answer(started, 200, { ...base, ok: true, status: "held", reasons: ["The employee chose to enter the six details by hand.", ...flagReasons], inquiry_id: inquiryId, next_step: "enter_details_by_hand" });
   }
 
-  const { extraction, usage } = await runExtraction(text, inquiryId, false, EXTRACTION_MODEL);
+  const usage = noUsage();
+  const extraction = await runExtraction(text, inquiryId, false, EXTRACTION_MODEL, usage);
   const checked = checkedList(settings, EXTRACTION_MODEL, replaced);
   if (!extraction.ok) {
     const reason = extractionHeldReason(extraction.reason);
@@ -269,13 +399,14 @@ async function handleSubmit(started: number, body: Record<string, unknown>, user
       .update({ extraction_status: "failed", extraction_error: extraction.reason, model: EXTRACTION_MODEL, checked })
       .eq("id", submissionId);
     await db.from("inquiries").update({ next_step: "enter_details_by_hand" }).eq("id", inquiryId);
-    await alertCoordinator(inquiryId, `Task 1 extraction failed: ${extraction.reason}`);
+    await alertCoordinator(inquiryId, "T1", `Task 1 extraction failed: ${extraction.reason}`);
     return answer(started, 200, { ...base, ok: true, status: "held", reasons: [reason, ...flagReasons], usage, inquiry_id: inquiryId, next_step: "enter_details_by_hand", notice: reason });
   }
 
   const decision = checkEventDetails(extraction.fields, text);
-  const nextStep = await saveDecision(inquiryId, submissionId, { extraction_status: "succeeded", model: EXTRACTION_MODEL, checked }, decision);
-  return answer(started, 200, { ...base, ok: true, status: decision.d1_result, reasons: [...d1Reasons(decision), ...flagReasons], usage, inquiry_id: inquiryId, d1_result: decision.d1_result, next_step: nextStep });
+  await saveDecision(inquiryId, submissionId, { extraction_status: "succeeded", model: EXTRACTION_MODEL, checked }, decision);
+  const result = await afterD1(inquiryId, submissionId, decision, usage);
+  return answer(started, 200, { ...base, ok: true, status: result.status, reasons: [...result.reasons, ...flagReasons], usage, inquiry_id: inquiryId, d1_result: decision.d1_result, next_step: result.next_step });
 }
 
 async function handleManual(started: number, body: Record<string, unknown>) {
@@ -321,13 +452,15 @@ async function handleManual(started: number, body: Record<string, unknown>) {
   }
 
   const decision = checkEventDetails(raw, "");
-  const nextStep = await saveDecision(
+  await saveDecision(
     inquiryId,
     submission.id,
     { extraction_method: "by_hand", extraction_status: "entered_by_hand", checked: checkedList(settings, null) },
     decision,
   );
-  return answer(started, 200, { ...base, ok: true, status: decision.d1_result, reasons: d1Reasons(decision), inquiry_id: inquiryId, d1_result: decision.d1_result, next_step: nextStep });
+  const usage = noUsage();
+  const result = await afterD1(inquiryId, submission.id, decision, usage);
+  return answer(started, 200, { ...base, ok: true, status: result.status, reasons: result.reasons, usage, inquiry_id: inquiryId, d1_result: decision.d1_result, next_step: result.next_step });
 }
 
 /** The signed-in staff member's user id, or null. */

@@ -23,10 +23,11 @@
   const LAYOUTS = ["theater", "classroom", "banquet", "reception", "boardroom"];
 
   async function load() {
-    const [{ data: inquiry, error }, { data: submissions }, { data: alerts }] = await Promise.all([
+    const [{ data: inquiry, error }, { data: submissions }, { data: alerts }, { data: assessments }] = await Promise.all([
       sb.from("inquiries").select("*").eq("id", id).maybeSingle(),
       sb.from("inquiry_submissions").select("*").eq("inquiry_id", id).order("submission_number", { ascending: false }),
       sb.from("coordinator_alerts").select("task, problem, created_at, resolved_at").eq("inquiry_id", id).order("created_at"),
+      sb.from("setup_assessments").select("*").eq("inquiry_id", id).order("created_at", { ascending: false }).limit(1),
     ]);
     if (error || !inquiry) {
       content.replaceChildren(notice("bad", "Inquiry not found", "Check the inquiry ID, or open it from the dashboard."));
@@ -40,6 +41,12 @@
 
     const parts = [];
     parts.push(decisionCard(inquiry, sub));
+    const assessment = (assessments || [])[0];
+    if (assessment) parts.push(setupCard(assessment));
+    else if (inquiry.next_step === "held_setup_shortage") {
+      parts.push(el("section", { class: "card" }, notice("warn", "Setup needs not worked out",
+        "The room list could not be read. The event coordinator was told; try again once the Rooms page loads.")));
+    }
     if (sub && sub.flags && sub.flags.length) {
       parts.push(el("section", { class: "card" },
         el("h2", { style: "margin-top:0", text: "Flagged for a person" }),
@@ -95,6 +102,47 @@
         inquiry.d1_result ? reportProblemButton(id, "D1 decision and extracted details") : null),
       el("p", { text: explanation }),
       sub && sub.model ? el("p", { class: "hint", text: `Read by ${sub.model}${sub.extraction_method === "by_hand" ? " (then entered by hand)" : ""}.` }) : null);
+  }
+
+  /** T3 setup needs and the D2 decision. */
+  function setupCard(a) {
+    const routeClass = { template: "sufficient", tailored: "neutral", clarify: "missing", held: "failed" }[a.route];
+    const statusBadge = (s) => el("span", { class: `badge ${s === "needed" ? "found" : s === "unknown" ? "conflicting" : "neutral"}`, text: s });
+    const rows = [
+      ...(a.tables || []).map((t) => ({ item: t.item, qty: t.qty, status: t.status, source: t.source })),
+      ...(a.chairs ? [{ item: "Chairs", qty: a.chairs.qty, status: a.chairs.status, source: a.chairs.source }] : []),
+      ...(a.av || []).map((x) => ({ item: x.item, qty: x.status === "not needed" ? "—" : x.qty, status: x.status, source: x.source })),
+      ...(a.setup_teardown ? [{ item: "Setup and teardown", qty: "—", status: a.setup_teardown.status, source: a.setup_teardown.source }] : []),
+    ];
+    const yesNo = (v) => el("span", { class: `badge ${v ? "found" : "missing"}`, text: v ? "yes" : "no" });
+    const list = (title, items) => items && items.length
+      ? [el("h3", { text: title }), el("ul", {}, items.map((i) => el("li", { text: i })))] : [];
+    return el("section", { class: "card" },
+      el("div", { class: "switch-row" },
+        el("h2", { style: "margin:0", text: "T3 · Setup needs and D2 · Use template?" }),
+        el("span", { class: `badge ${routeClass}`, text: LABELS.route[a.route] || a.route }),
+        reportProblemButton(id, "T3 setup needs and D2 route")),
+      el("p", {}, a.room
+        ? `Recommended room: ${a.room} (${a.layout} capacity ${a.room_capacity}) for ${a.guest_count} guests.`
+        : `No room recommended for ${a.guest_count} guests in a ${a.layout} layout.`),
+      el("div", { class: "table-wrap" }, el("table", { class: "stack-sm" },
+        el("thead", {}, el("tr", {}, ["Item", "Quantity", "Status", "Source"].map((h) => el("th", { text: h })))),
+        el("tbody", {}, rows.map((r) => el("tr", {},
+          el("td", { "data-label": "Item", text: r.item }),
+          el("td", { "data-label": "Quantity", text: String(r.qty) }),
+          el("td", { "data-label": "Status" }, statusBadge(r.status)),
+          el("td", { "data-label": "Source", text: r.source })))))),
+      el("h3", { text: "D2 checks" }),
+      el("ul", { class: "plain" },
+        el("li", {}, "Event type on the template list: ", yesNo(a.on_template_list), ` (${a.event_type})`),
+        el("li", {}, "Guest count fits a standard layout of the room: ", yesNo(a.fits_standard_layout)),
+        el("li", {}, "Special requests: ", a.special_requests.length ? a.special_requests.join("; ") : "none",
+          a.special_requests_checked ? "" : el("span", { class: "note", text: "Special requests not checked – review in T6." }))),
+      ...list("Held for a person", a.shortages),
+      ...list("Unresolved", a.unresolved),
+      ...list("Questions for the client", a.questions),
+      ...list("Assumptions", a.assumptions),
+      (a.checked && a.checked.length) ? el("p", { class: "hint", text: `Checked: ${a.checked.join(" · ")}` }) : "");
   }
 
   function fieldsCard(fields) {

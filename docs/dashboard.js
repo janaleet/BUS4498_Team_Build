@@ -24,14 +24,14 @@
   }
   const d1Badge = (row) => row.d1_result
     ? el("span", { class: `badge ${row.d1_result}`, text: row.d1_result === "sufficient" ? "Details sufficient" : "Details missing" })
-    : row.next_step === "enter_details_by_hand"
+    : ["enter_details_by_hand", "held_setup_shortage"].includes(row.next_step)
     ? el("span", { class: "badge failed", text: "Held for a person" })
     : el("span", { class: "badge neutral", text: "Not decided" });
   list.replaceChildren(el("table", { class: "stack-sm" },
     el("thead", {}, el("tr", {}, ["Inquiry", "Received", "Status", "Details (D1)", "Next step", ""].map((h) => el("th", { text: h })))),
     el("tbody", {}, data.map((row) => el("tr", {},
-      el("td", { "data-label": "Inquiry" }, el("a", { href: `inquiry.html?id=${encodeURIComponent(row.id)}`, text: row.id })),
-      el("td", { "data-label": "Received", text: formatDateTime(row.created_at) }),
+      el("td", { "data-label": "Inquiry", class: "nowrap" }, el("a", { href: `inquiry.html?id=${encodeURIComponent(row.id)}`, text: row.id })),
+      el("td", { "data-label": "Received", class: "nowrap", text: formatDateTime(row.created_at) }),
       el("td", { "data-label": "Status", text: LABELS.status[row.status] || row.status }),
       el("td", { "data-label": "Details (D1)" }, d1Badge(row)),
       el("td", { "data-label": "Next step", text: LABELS.nextStep[row.next_step] || row.next_step }),

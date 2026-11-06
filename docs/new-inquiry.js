@@ -49,7 +49,10 @@
     document.getElementById("counts").replaceChildren(...Object.entries(labels).map(([key, label]) =>
       el("li", {}, el("span", { class: "badge neutral", text: `${label}: ${result.replaced[key] || 0}` }))));
     document.getElementById("warnings").replaceChildren(
-      ...(result.warnings || []).map((w) => notice("warn", "Check by eye", w)),
+      // Skip the "no names found" warning when the text already uses [NAME] placeholders.
+      ...(result.warnings || [])
+        .filter((w) => !(/No client names were found/.test(w) && /\[NAME\]/.test(result.text)))
+        .map((w) => notice("warn", "Check by eye", w)),
       ...(result.flags || []).map((line) => notice("warn", "This line tries to instruct the agent",
         `"${line}" — it will be flagged for a person and not followed.`)));
     confirm.checked = false;

@@ -30,7 +30,16 @@
       extracting: "Reading the inquiry",
       enter_details_by_hand: "Enter the details by hand",
       t2_clarification: "Task 2 – ask the client for missing details (coming in Group 3)",
-      t3_setup_needs: "Task 3 – work out setup needs (coming in Group 2)",
+      t3_setup_needs: "Task 3 – working out setup needs",
+      t4_template_proposal: "Task 4 – template proposal (coming in Group 4)",
+      t5_tailored_proposal: "Task 5 – tailored proposal (coming in Group 4)",
+      held_setup_shortage: "Held – an employee decides about a setup shortage",
+    },
+    route: {
+      template: "Template suitable",
+      tailored: "Tailoring needed",
+      clarify: "Ask the client",
+      held: "Held for a person",
     },
   };
 
@@ -115,6 +124,7 @@
     const isStaff = ctx && ctx.staff;
     const nav = el("nav", { "aria-label": "Main" }, link("dashboard.html", "Dashboard"),
       isStaff ? link("new-inquiry.html", "New inquiry") : null,
+      isStaff ? link("rooms.html", "Rooms") : null,
       isStaff ? link("settings.html", "Settings") : null);
     const who = ctx && ctx.user
       ? el("span", { class: "who" },
