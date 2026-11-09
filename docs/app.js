@@ -29,11 +29,13 @@
     nextStep: {
       extracting: "Reading the inquiry",
       enter_details_by_hand: "Enter the details by hand",
-      t2_clarification: "Task 2 – ask the client for missing details (coming in Group 3)",
+      t2_clarification: "Task 2 – a clarification request waits for approval",
       t3_setup_needs: "Task 3 – working out setup needs",
       t4_template_proposal: "Task 4 – template proposal (coming in Group 4)",
       t5_tailored_proposal: "Task 5 – tailored proposal (coming in Group 4)",
       held_setup_shortage: "Held – an employee decides about a setup shortage",
+      waiting_for_reply: "Waiting for the client's reply",
+      stopped: "Stopped",
     },
     route: {
       template: "Template suitable",
@@ -181,7 +183,13 @@
 
   /** Call an Edge Function with the publishable key and the user's sign-in token. */
   async function callFunction(name, body) {
-    const { data } = await sb.auth.getSession();
+    let { data } = await sb.auth.getSession();
+    // A page left open in the background may hold a sign-in that is about to expire;
+    // refresh it first so the agent never sees an expired one.
+    if (data.session && data.session.expires_at * 1000 - Date.now() < 120000) {
+      const refreshed = await sb.auth.refreshSession();
+      if (refreshed.data && refreshed.data.session) data = refreshed.data;
+    }
     const token = data.session ? data.session.access_token : "";
     let response;
     try {

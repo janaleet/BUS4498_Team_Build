@@ -1,6 +1,7 @@
 // Edge Function: agent
 // Carries out T1 · Review supplied event details, D1 (Sufficient event details?),
-// T3 · Identify event setup needs, and D2 (Use template?). Later groups add the next tasks.
+// T3 · Identify event setup needs, D2 (Use template?), and T2 · Prepare clarification
+// request (drafts only; an employee approves and sends). Later groups add the next tasks.
 //
 // GET  -> status check; calls no AI and saves nothing.
 // POST -> JSON body:
@@ -10,6 +11,8 @@
 //     { "action": "preview", "text" }                    removes personal details; saves nothing
 //     { "action": "submit", "text", "confirmed": true, "by_hand"?: bool }
 //     { "action": "manual", "inquiry_id", "fields" }     six details typed by an employee
+//     { "action": "reply", "inquiry_id", "text", "confirmed": true }   the client's reply, same inquiry ID
+//     { "action": "redraft", "request_id", "by_hand"?: bool }          new T2 draft after a rejection
 // Every answer has ok, status (one word), reasons, dry_run, ms, and usage.
 // Final statuses: template (-> T4), tailored (-> T5), clarify (-> T2), held (a person decides),
 // paused, refused.
@@ -20,6 +23,11 @@ import { EXTRACTION_MODEL, extractEventDetails } from "./extract.ts";
 import { FLAG_MODEL, flagSetupQuestions } from "./flag.ts";
 import { assessSetup, setupReasons } from "./setup.js";
 import { findInstructionLikeText } from "./flags.js";
+import { DRAFT_MODEL, draftClarification } from "./draft.ts";
+import {
+  addBusinessDays, assembleDraft, buildIssues, checkDraft, checklistWording, DEADLINE_BUSINESS_DAYS, eventSummary,
+  mergeReplyFields, REMINDER_BUSINESS_DAY, todayInVenue,
+} from "./clarify.js";
 
 const MAX_TEXT_LENGTH = 20_000;
 // Models test mode may compare. Add the models runtime/test-plan.md lists under
@@ -78,6 +86,7 @@ async function readSettings() {
     paused: map.paused === true,
     aiDailyRunLimit: Number(map.ai_daily_run_limit ?? 0),
     testRunsPerDay: Number(map.test_runs_per_day ?? 0),
+    holidays: Array.isArray(map.holidays) ? (map.holidays as string[]) : [],
   };
 }
 
@@ -275,6 +284,103 @@ async function runSetup(
   return { assessment, reasons, checked };
 }
 
+/**
+ * T2: draft a clarification request for the issues, check it, and (unless dryRun) save it
+ * as a draft that waits for an employee's approval. The AI words the questions; code adds
+ * the inquiry ID, numbering, reply-by date and reply line, and checks the result. If the
+ * AI can't draft, or its draft fails the check, the draft is written from the checklist.
+ */
+async function runClarification(opts: {
+  issues: Record<string, unknown>[];
+  fields: Record<string, { value: string; status: string }>;
+  sourceText: string;
+  inquiryId: string | null;
+  submissionId: number | null;
+  dryRun: boolean;
+  model: string;
+  usage: Usage;
+  holidays: string[];
+  rejectionReason?: string;
+  redraftOf?: number;
+  byHand?: boolean;
+}) {
+  const id = opts.inquiryId ?? "INQ-TEST";
+  const today = todayInVenue();
+  const deadline = addBusinessDays(today, DEADLINE_BUSINESS_DAYS, opts.holidays);
+  const reminderDue = addBusinessDays(today, REMINDER_BUSINESS_DAY, opts.holidays);
+  const problems: string[] = [];
+  let draftedBy = "checklist";
+  let draft = assembleDraft(id, deadline, checklistWording(opts.issues));
+
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+  if (opts.byHand) {
+    problems.push("Written from the checklist at the employee's request.");
+  } else if (!apiKey) {
+    problems.push("The AI key is not set up, so this draft was written from the checklist.");
+  } else {
+    const { beforeCall, afterCall } = aiHooks("T2 draft_clarification_request", opts.inquiryId, opts.dryRun, opts.model, opts.usage);
+    let result: Awaited<ReturnType<typeof draftClarification>>;
+    try {
+      result = await draftClarification(apiKey, {
+        event_summary: eventSummary(opts.fields),
+        client_asked: /\b(price|pricing|cost|how much|rate|available|availability)\b/i.test(opts.sourceText) ? "the client asked about price or availability" : "",
+        issues: opts.issues.map((i) => ({ label: i.label, status: i.status, client_said: i.known, evidence: i.evidence, usable_answer: i.usable_answer })),
+        inquiry_text: opts.sourceText,
+        rejection_reason: opts.rejectionReason,
+      }, beforeCall, afterCall, opts.model);
+    } catch (e) {
+      result = { ok: false, reason: e instanceof Error ? e.message : String(e), attempts: 0 };
+    }
+    if (result.ok) {
+      const aiDraft = assembleDraft(id, deadline, result.wording);
+      const check = checkDraft(aiDraft, id, deadline, opts.issues.length);
+      if (check.ok) {
+        draft = aiDraft;
+        draftedBy = "ai";
+      } else {
+        problems.push(`The AI draft failed the check (${check.problems.join(" ")}), so this draft was written from the checklist.`);
+      }
+    } else {
+      problems.push(`The AI could not draft (${result.reason}), so this draft was written from the checklist.`);
+    }
+  }
+  const check = checkDraft(draft, id, deadline, opts.issues.length);
+
+  let requestId: number | null = null;
+  if (!opts.dryRun && opts.inquiryId && opts.submissionId) {
+    const { data, error } = await db.from("clarification_requests").insert({
+      inquiry_id: opts.inquiryId,
+      submission_id: opts.submissionId,
+      kind: "request",
+      subject: draft.subject,
+      body: draft.body,
+      issues: opts.issues,
+      questions: draft.questions,
+      deadline,
+      reminder_due: reminderDue,
+      drafted_by: draftedBy,
+      model: draftedBy === "ai" ? opts.model : null,
+      draft_problems: problems,
+      redraft_of: opts.redraftOf ?? null,
+    }).select("id").single();
+    if (error) throw new Error(`clarification draft not saved: ${error.message}`);
+    requestId = data.id;
+    await db.from("inquiries").update({ next_step: "t2_clarification" }).eq("id", opts.inquiryId);
+    if (draftedBy !== "ai" && !opts.byHand) await alertCoordinator(opts.inquiryId, "T2", problems.join(" "));
+  }
+  return {
+    request_id: requestId,
+    subject: draft.subject,
+    body: draft.body,
+    deadline,
+    reminder_due: reminderDue,
+    drafted_by: draftedBy,
+    problems,
+    check,
+    issues: opts.issues,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Test mode: decide as usual, save nothing (permission rule 10).
 // ---------------------------------------------------------------------------
@@ -303,13 +409,24 @@ async function handleDryRun(started: number, body: Record<string, unknown>) {
   }
   const decision = checkEventDetails(extraction.fields, text);
   if (decision.d1_result === "missing") {
-    return answer(started, 200, { ...base, ok: true, status: "clarify", reasons: [...d1MissingReasons(decision), ...flagReasons], usage, d1_result: "missing", fields: decision.fields, missing_fields: decision.missing_fields, flags, checked });
+    const clarification = await runClarification({
+      issues: buildIssues(decision, null), fields: decision.fields, sourceText: text, inquiryId: null, submissionId: null,
+      dryRun: true, model, usage, holidays: settings.holidays,
+    });
+    return answer(started, 200, { ...base, ok: true, status: "clarify", reasons: [...d1MissingReasons(decision), ...flagReasons], usage, d1_result: "missing", fields: decision.fields, missing_fields: decision.missing_fields, clarification, flags, checked });
   }
   const setup = await runSetup(decision.fields, null, null, true, model, usage);
   if ("held" in setup) {
     return answer(started, 200, { ...base, ok: true, status: "held", reasons: [setup.held, ...flagReasons], usage, d1_result: "sufficient", fields: decision.fields, flags, checked });
   }
+  const clarification = setup.assessment.route === "clarify"
+    ? await runClarification({
+      issues: buildIssues(decision, setup.assessment), fields: decision.fields, sourceText: text, inquiryId: null, submissionId: null,
+      dryRun: true, model, usage, holidays: settings.holidays,
+    })
+    : undefined;
   return answer(started, 200, {
+    clarification,
     ...base,
     ok: true,
     status: setup.assessment.route,
@@ -348,11 +465,31 @@ async function saveDecision(
   if (inquiryError) throw new Error(`inquiry not updated: ${inquiryError.message}`);
 }
 
-/** After D1 is saved: run T3 + D2 when the details are sufficient; return status and reasons. */
-async function afterD1(inquiryId: string, submissionId: number, decision: ReturnType<typeof checkEventDetails>, usage: Usage) {
-  if (decision.d1_result === "missing") return { status: "clarify", reasons: d1MissingReasons(decision), next_step: NEXT_STEP.clarify };
+/**
+ * After D1 is saved: run T3 + D2 when the details are sufficient, and T2 (a draft for an
+ * employee to approve) when the client must be asked. Returns status, reasons, next step.
+ */
+async function afterD1(
+  inquiryId: string,
+  submissionId: number,
+  decision: ReturnType<typeof checkEventDetails>,
+  usage: Usage,
+  sourceText: string,
+  holidays: string[],
+) {
+  const clarify = (issues: Record<string, unknown>[]) => runClarification({
+    issues, fields: decision.fields, sourceText, inquiryId, submissionId, dryRun: false, model: DRAFT_MODEL, usage, holidays,
+  });
+  if (decision.d1_result === "missing") {
+    const draft = await clarify(buildIssues(decision, null));
+    return { status: "clarify", reasons: [...d1MissingReasons(decision), "A clarification request is drafted and waits for an employee's approval."], next_step: NEXT_STEP.clarify, request_id: draft.request_id };
+  }
   const setup = await runSetup(decision.fields, inquiryId, submissionId, false, FLAG_MODEL, usage);
   if ("held" in setup) return { status: "held", reasons: [setup.held], next_step: NEXT_STEP.held };
+  if (setup.assessment.route === "clarify") {
+    const draft = await clarify(buildIssues(decision, setup.assessment));
+    return { status: "clarify", reasons: [...setup.reasons, "A clarification request is drafted and waits for an employee's approval."], next_step: NEXT_STEP.clarify, request_id: draft.request_id };
+  }
   return { status: setup.assessment.route, reasons: setup.reasons, next_step: NEXT_STEP[setup.assessment.route] };
 }
 
@@ -405,7 +542,7 @@ async function handleSubmit(started: number, body: Record<string, unknown>, user
 
   const decision = checkEventDetails(extraction.fields, text);
   await saveDecision(inquiryId, submissionId, { extraction_status: "succeeded", model: EXTRACTION_MODEL, checked }, decision);
-  const result = await afterD1(inquiryId, submissionId, decision, usage);
+  const result = await afterD1(inquiryId, submissionId, decision, usage, text, settings.holidays);
   return answer(started, 200, { ...base, ok: true, status: result.status, reasons: [...result.reasons, ...flagReasons], usage, inquiry_id: inquiryId, d1_result: decision.d1_result, next_step: result.next_step });
 }
 
@@ -459,8 +596,94 @@ async function handleManual(started: number, body: Record<string, unknown>) {
     decision,
   );
   const usage = noUsage();
-  const result = await afterD1(inquiryId, submission.id, decision, usage);
+  const result = await afterD1(inquiryId, submission.id, decision, usage, "", settings.holidays);
   return answer(started, 200, { ...base, ok: true, status: result.status, reasons: result.reasons, usage, inquiry_id: inquiryId, d1_result: decision.d1_result, next_step: result.next_step });
+}
+
+/**
+ * The client's reply, pasted by an employee: same inquiry ID, back to T1. Details the
+ * reply leaves out are copied from the earlier record (memory rule 2), then D1, T3/D2,
+ * and T2 run again.
+ */
+async function handleReply(started: number, body: Record<string, unknown>, userId: string) {
+  const base = { dry_run: false };
+  const refuse = (httpStatus: number, message: string, status = "refused") =>
+    answer(started, httpStatus, { ...base, ok: false, status, reasons: [message], error: message });
+  if (body.confirmed !== true) return refuse(400, "Confirm that no client personal details remain before submitting.");
+  const inquiryId = typeof body.inquiry_id === "string" ? body.inquiry_id : "";
+  if (!/^INQ-\d{4,}$/.test(inquiryId)) return refuse(400, "Unknown inquiry ID.");
+  const settings = await readSettings();
+  if (settings.paused) return refuse(200, "The agent is paused. Nothing was saved.", "paused");
+  const cleaned = clean(body.text);
+  if (cleaned.refused) return refuse(400, cleaned.refused);
+  if (cleaned.held) return refuse(422, cleaned.held, "held");
+  const { text, replaced } = cleaned.result!;
+  const flags = findInstructionLikeText(text);
+
+  const { data: previous, error: prevError } = await db
+    .from("inquiry_submissions")
+    .select("id, fields")
+    .eq("inquiry_id", inquiryId)
+    .order("submission_number", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (prevError) throw new Error(`earlier record not read: ${prevError.message}`);
+
+  const { data: submissionId, error: replyError } = await db.rpc("add_client_reply", {
+    p_inquiry_id: inquiryId,
+    p_deidentified_text: text,
+    p_placeholders_replaced: replaced,
+    p_submitted_by: userId,
+    p_flags: flags,
+  });
+  if (replyError) return refuse(409, replyError.message);
+  if (flags.length) await alertCoordinator(inquiryId, "T1", `Client reply tried to instruct the agent: ${flags.join(" / ")}`);
+
+  const usage = noUsage();
+  const extraction = await runExtraction(text, inquiryId, false, EXTRACTION_MODEL, usage);
+  const checked = [...checkedList(settings, EXTRACTION_MODEL, replaced), "Earlier record: details the reply leaves out are copied from it"];
+  if (!extraction.ok) {
+    const reason = extractionHeldReason(extraction.reason);
+    await db.from("inquiry_submissions").update({ extraction_status: "failed", extraction_error: extraction.reason, model: EXTRACTION_MODEL, checked }).eq("id", submissionId);
+    await db.from("inquiries").update({ next_step: "enter_details_by_hand" }).eq("id", inquiryId);
+    await alertCoordinator(inquiryId, "T1", `Task 1 extraction of the client reply failed: ${extraction.reason}`);
+    return answer(started, 200, { ...base, ok: true, status: "held", reasons: [reason], usage, inquiry_id: inquiryId, next_step: "enter_details_by_hand" });
+  }
+  const merged = mergeReplyFields(previous?.fields ?? {}, extraction.fields);
+  const decision = checkEventDetails(merged, text);
+  await saveDecision(inquiryId, submissionId, { extraction_status: "succeeded", model: EXTRACTION_MODEL, checked }, decision);
+  const result = await afterD1(inquiryId, submissionId, decision, usage, text, settings.holidays);
+  return answer(started, 200, { ...base, ok: true, status: result.status, reasons: result.reasons, usage, inquiry_id: inquiryId, d1_result: decision.d1_result, next_step: result.next_step });
+}
+
+/** A new T2 draft after an employee rejected one: the AI uses the reason, or code writes it from the checklist. */
+async function handleRedraft(started: number, body: Record<string, unknown>) {
+  const base = { dry_run: false };
+  const refuse = (httpStatus: number, message: string, status = "refused") =>
+    answer(started, httpStatus, { ...base, ok: false, status, reasons: [message], error: message });
+  const requestId = Number(body.request_id);
+  if (!Number.isInteger(requestId)) return refuse(400, "Unknown message.");
+  const settings = await readSettings();
+  if (settings.paused) return refuse(200, "The agent is paused. Nothing was saved.", "paused");
+  const { data: rejected, error } = await db.from("clarification_requests").select("*").eq("id", requestId).maybeSingle();
+  if (error) throw new Error(`message not read: ${error.message}`);
+  if (!rejected || rejected.kind !== "request" || rejected.status !== "rejected") return refuse(409, "Only a rejected clarification request can be redrafted.");
+  const { data: newer } = await db.from("clarification_requests").select("id").eq("submission_id", rejected.submission_id)
+    .eq("kind", "request").gt("id", rejected.id).limit(1);
+  if (newer && newer.length) return refuse(409, "A newer draft already exists for this inquiry.");
+  const { data: submission } = await db.from("inquiry_submissions").select("fields, deidentified_text").eq("id", rejected.submission_id).single();
+
+  const usage = noUsage();
+  const draft = await runClarification({
+    issues: rejected.issues, fields: submission?.fields ?? {}, sourceText: submission?.deidentified_text ?? "",
+    inquiryId: rejected.inquiry_id, submissionId: rejected.submission_id, dryRun: false, model: DRAFT_MODEL, usage,
+    holidays: settings.holidays, rejectionReason: rejected.reject_reason, redraftOf: rejected.id, byHand: body.by_hand === true,
+  });
+  return answer(started, 200, {
+    ...base, ok: true, status: "clarify",
+    reasons: [draft.drafted_by === "ai" ? "A new draft was written using the rejection reason. It waits for approval." : "A new draft was written from the checklist. It waits for approval.", ...draft.problems],
+    usage, inquiry_id: rejected.inquiry_id, request_id: draft.request_id,
+  });
 }
 
 /** The signed-in staff member's user id, or null. */
@@ -525,6 +748,10 @@ Deno.serve(async (req: Request) => {
         return await handleSubmit(started, body, userId);
       case "manual":
         return await handleManual(started, body);
+      case "reply":
+        return await handleReply(started, body, userId);
+      case "redraft":
+        return await handleRedraft(started, body);
       default:
         return answer(started, 400, { ok: false, status: "refused", reasons: ["Unknown action."], dry_run: false, error: "Unknown action." });
     }

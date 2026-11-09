@@ -194,3 +194,5 @@ ul.plain li:last-child { border-bottom: none; }
 }
 td.nowrap { white-space: nowrap; }
 h3 { font-size: 16px; margin: 18px 0 6px; }
+details { margin: 12px 0; }
+summary { cursor: pointer; color: var(--accent); }
