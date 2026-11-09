@@ -33,6 +33,7 @@
       sb.from("clarification_requests").select("*").eq("inquiry_id", id).order("id", { ascending: false }),
       sb.from("staff_members").select("user_id, display_name"),
     ]);
+    const { data: proposals } = await sb.from("proposals").select("*").eq("inquiry_id", id).order("version", { ascending: false });
     staffNames = Object.fromEntries((staff || []).map((s) => [s.user_id, s.display_name]));
     if (error || !inquiry) {
       content.replaceChildren(notice("bad", "Inquiry not found", "Check the inquiry ID, or open it from the dashboard."));
@@ -54,6 +55,9 @@
     }
     if ((requests && requests.length) || ["waiting_for_client", "stopped_no_response"].includes(inquiry.status)) {
       parts.push(clarificationCard(inquiry, requests || []));
+    }
+    if ((proposals && proposals.length) || ["t4_template_proposal", "t5_tailored_proposal"].includes(inquiry.next_step)) {
+      parts.push(proposalCard(inquiry, proposals || []));
     }
     if (sub && sub.flags && sub.flags.length) {
       parts.push(el("section", { class: "card" },
@@ -331,6 +335,107 @@
           r.reject_reason ? el("span", { class: "note", text: `Rejected: "${r.reject_reason}"` }) : "")))));
     }
     section.append(reportProblemButton(id, "T2 clarification request"));
+    return section;
+  }
+
+  /**
+   * T4/T5 · Proposal: download the .docx, see the filled sections, the departures from the
+   * standard template (reviewer only), items to confirm, and edit the tailored sections by
+   * hand (code rebuilds the file as a new version; nothing is uploaded).
+   */
+  function proposalCard(inquiry, proposals) {
+    const status = el("div");
+    const current = proposals.find((p) => p.status === "draft");
+    const section = el("section", { class: "card" }, el("h2", { style: "margin-top:0", text: "T4/T5 · Proposal" }));
+
+    const download = async (p, button) => {
+      button.disabled = true;
+      const { data, error } = await sb.storage.from("proposals").createSignedUrl(p.file_path, 60, { download: `${id}-proposal-v${p.version}.docx` });
+      button.disabled = false;
+      if (error || !data) { status.replaceChildren(notice("bad", "Download didn't start", error ? error.message : "")); return; }
+      location.href = data.signedUrl;
+    };
+
+    if (!current) {
+      const draft = el("button", { type: "button", text: "Draft the proposal" });
+      draft.addEventListener("click", async () => {
+        draft.disabled = true;
+        draft.textContent = "Drafting (up to a minute)…";
+        const result = await callFunction("agent", { action: "draft_proposal", inquiry_id: id });
+        draft.disabled = false;
+        draft.textContent = "Draft the proposal";
+        if (!result.ok) { status.replaceChildren(notice("bad", "No proposal drafted", result.error || (result.reasons || []).join(" "))); return; }
+        message.replaceChildren(notice("ok", "Proposal drafted", (result.reasons || []).join(" ")));
+        await load();
+      });
+      section.append(el("p", { text: "No proposal has been drafted for this inquiry yet." }), el("div", { class: "actions" }, draft));
+    } else {
+      const s = current.sections || {};
+      const lines = (v) => (Array.isArray(v) ? v : [v]).filter(Boolean);
+      const kindBadge = el("span", { class: `badge ${current.kind === "template" ? "sufficient" : "neutral"}`, text: current.kind === "template" ? "Template (T4)" : "Tailored (T5)" });
+      const by = { code: "filled by code", ai: `tailored sections by ${current.model}`, by_hand: "tailored sections need writing by hand", employee_edit: `edited by ${who(current.edited_by)}` }[current.drafted_by];
+      const dl = el("button", { type: "button", text: `Download .docx (version ${current.version})` });
+      dl.addEventListener("click", () => download(current, dl));
+      section.append(
+        el("div", { class: "switch-row" }, kindBadge, el("span", { class: "hint", text: `Version ${current.version}, ${by}, ${formatDateTime(current.created_at)}` })),
+        current.problems && current.problems.length ? notice("warn", "Needs attention", current.problems.join(" ")) : "",
+        el("div", { class: "actions" }, dl),
+        el("p", { class: "hint", text: "Next: Task 6, review (coming in Group 5). Before sending, the employee adds the client's name and the venue's details in Word." }));
+      const rows = [
+        ["Event", `${s.event_type} · ${s.event_date} · ${s.start_time} – ${s.end_time} · ${s.guest_count} guests · ${s.layout}`],
+        ["Room", `${s.room}`], ["Room notes", lines(s.room_notes)], ["Tables", lines(s.tables)], ["Chairs", s.chairs],
+        ["AV equipment", lines(s.av_equipment)], ["Setup and teardown", lines(s.setup_requirements)],
+        ["Items to confirm", lines(s.unresolved_items)], ["Assumptions", lines(s.assumptions)],
+      ];
+      section.append(el("div", { class: "table-wrap" }, el("table", { class: "stack-sm" },
+        el("tbody", {}, rows.map(([label, v]) => el("tr", {},
+          el("th", { scope: "row", text: label }),
+          el("td", { "data-label": label }, Array.isArray(v) ? v.map((line) => el("div", { text: line })) : String(v))))))));
+      if (current.deviations && current.deviations.length) {
+        section.append(el("h3", { text: "Changes from the standard template (for the reviewer; not in the client's file)" }),
+          el("ul", {}, current.deviations.map((d) => el("li", { text: `${d.section}: ${d.change} — because ${d.d2_reason}` }))));
+      }
+
+      // Edit the tailored sections by hand; code rebuilds the file.
+      const asText = (v) => lines(v).filter((x) => x !== "None").join("\n");
+      const inputs = {};
+      const form = el("div", {});
+      for (const [key, label, hint] of [
+        ["room_notes", "Room notes", "One short paragraph."],
+        ["setup_requirements", "Setup and teardown", "One line per item."],
+        ["unresolved_items", "Items to confirm", "One line per item."],
+        ["assumptions", "Assumptions", "One line per item."],
+      ]) {
+        inputs[key] = el("textarea", { id: `edit-${key}`, class: "short" });
+        inputs[key].value = key === "room_notes" ? (Array.isArray(s.room_notes) ? s.room_notes.join(" ") : s.room_notes || "") : asText(s[key]);
+        form.append(el("label", { for: inputs[key].id, text: `${label} ` }, el("span", { class: "hint", text: hint })), inputs[key]);
+      }
+      const save = el("button", { type: "button", text: "Save edits as a new version" });
+      save.addEventListener("click", async () => {
+        save.disabled = true;
+        save.textContent = "Rebuilding…";
+        const sections = Object.fromEntries(Object.entries(inputs).map(([k, input]) => [k, input.value]));
+        const result = await callFunction("agent", { action: "rebuild_proposal", proposal_id: current.id, sections });
+        save.disabled = false;
+        save.textContent = "Save edits as a new version";
+        if (!result.ok) { status.replaceChildren(notice("bad", "Not saved", result.error || (result.reasons || []).join(" "))); return; }
+        message.replaceChildren(notice("ok", "New version saved", (result.reasons || []).join(" ")));
+        await load();
+      });
+      section.append(el("details", {}, el("summary", { text: "Edit the tailored sections by hand" }),
+        el("p", { class: "hint", text: "Write anything marked [TO CONFIRM – write by hand] here. Don't add client names or contact details, prices, or facts the client didn't give." }),
+        form, el("div", { class: "actions" }, save)));
+    }
+    const older = proposals.filter((p) => p !== current);
+    if (older.length) {
+      section.append(el("details", {}, el("summary", { text: `Earlier versions (${older.length})` }),
+        el("ul", { class: "plain" }, older.map((p) => {
+          const b = el("button", { type: "button", class: "link", text: `Version ${p.version}` });
+          b.addEventListener("click", () => download(p, b));
+          return el("li", {}, b, ` · ${p.kind} · ${formatDateTime(p.created_at)}`);
+        }))));
+    }
+    section.append(status, reportProblemButton(id, "T4/T5 proposal"));
     return section;
   }
 

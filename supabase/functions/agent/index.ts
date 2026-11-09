@@ -1,7 +1,8 @@
 // Edge Function: agent
 // Carries out T1 · Review supplied event details, D1 (Sufficient event details?),
-// T3 · Identify event setup needs, D2 (Use template?), and T2 · Prepare clarification
-// request (drafts only; an employee approves and sends). Later groups add the next tasks.
+// T3 · Identify event setup needs, D2 (Use template?), T2 · Prepare clarification
+// request (drafts only; an employee approves and sends), T4 · Prepare template proposal
+// and T5 · Prepare tailored proposal. Later groups add T6 review and T7 revision.
 //
 // GET  -> status check; calls no AI and saves nothing.
 // POST -> JSON body:
@@ -13,6 +14,9 @@
 //     { "action": "manual", "inquiry_id", "fields" }     six details typed by an employee
 //     { "action": "reply", "inquiry_id", "text", "confirmed": true }   the client's reply, same inquiry ID
 //     { "action": "redraft", "request_id", "by_hand"?: bool }          new T2 draft after a rejection
+//     { "action": "draft_proposal", "inquiry_id" }                     T4/T5 for an inquiry at that step
+//     { "action": "rebuild_proposal", "proposal_id", "sections" }      employee's edited sections, rebuilt by code
+//   Test mode may also send "include_file": true to get the proposal .docx back as base64.
 // Every answer has ok, status (one word), reasons, dry_run, ms, and usage.
 // Final statuses: template (-> T4), tailored (-> T5), clarify (-> T2), held (a person decides),
 // paused, refused.
@@ -28,6 +32,12 @@ import {
   addBusinessDays, assembleDraft, buildIssues, checkDraft, checklistWording, DEADLINE_BUSINESS_DAYS, eventSummary,
   mergeReplyFields, REMINDER_BUSINESS_DAY, todayInVenue,
 } from "./clarify.js";
+import JSZip from "npm:jszip@3.10.1";
+import { TEMPLATE_DOCX_BASE64 } from "./template_docx.ts";
+import {
+  applyTailoring, buildTemplateValues, byHandTailoring, checkTailoring, EDITABLE, fillDocumentXml, markMissing,
+} from "./proposal.js";
+import { TAILOR_MODEL, tailorProposal } from "./tailor.ts";
 
 const MAX_TEXT_LENGTH = 20_000;
 // Models test mode may compare. Add the models runtime/test-plan.md lists under
@@ -39,7 +49,9 @@ const NEXT_STEP: Record<string, string> = {
   tailored: "t5_tailored_proposal",
   clarify: "t2_clarification",
   held: "held_setup_shortage",
+  review: "t6_review",
 };
+const DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -250,8 +262,9 @@ async function runSetup(
   ];
   console.log(JSON.stringify({ inquiry: inquiryId, dry_run: dryRun, route: assessment.route, flag: hasRequests ? (requests.ok ? "ok" : flagFailure) : "skipped" }));
 
+  let assessmentId: number | null = null;
   if (!dryRun && inquiryId && submissionId) {
-    const { error: saveError } = await db.from("setup_assessments").insert({
+    const { data: saved, error: saveError } = await db.from("setup_assessments").insert({
       inquiry_id: inquiryId,
       submission_id: submissionId,
       event_type: assessment.event_type,
@@ -274,14 +287,141 @@ async function runSetup(
       route: assessment.route,
       model: hasRequests && requests.ok ? model : null,
       checked,
-    });
+    }).select("id").single();
     if (saveError) throw new Error(`setup assessment not saved: ${saveError.message}`);
+    assessmentId = saved.id;
     const { error: stepError } = await db.from("inquiries").update({ next_step: NEXT_STEP[assessment.route] }).eq("id", inquiryId);
     if (stepError) throw new Error(`inquiry not updated: ${stepError.message}`);
     if (assessment.route === "held") await alertCoordinator(inquiryId, "T3", `Setup held: ${assessment.shortages.join(" ")}`);
     if (flagFailure) await alertCoordinator(inquiryId, "T3", `Special requests not checked (${flagFailure}); review in T6.`);
   }
-  return { assessment, reasons, checked };
+  return { assessment, reasons, checked, assessmentId };
+}
+
+/** Build the .docx from the template with every placeholder filled. */
+async function buildDocx(values: Record<string, unknown>): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(Uint8Array.from(atob(TEMPLATE_DOCX_BASE64), (c) => c.charCodeAt(0)));
+  const xml = await zip.file("word/document.xml")!.async("string");
+  zip.file("word/document.xml", fillDocumentXml(xml, values));
+  return await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+/**
+ * T4 (template, code only) or T5 (tailored: the AI writes the tailored sections, code places
+ * them). A failed template fill goes to T5, as the T4 spec says; a failed AI draft is built
+ * with "[TO CONFIRM – write by hand]" in the tailored sections and the coordinator is told.
+ * An employee's edited sections (editedSections) are placed by code with no AI.
+ * Unless dryRun, the .docx is stored and a new proposal version saved as the current draft.
+ */
+async function runProposal(opts: {
+  inquiryId: string | null;
+  submissionId: number | null;
+  assessmentId: number | null;
+  fields: Record<string, { value: string; status: string }>;
+  assessment: Record<string, any>; // deno-lint-ignore no-explicit-any
+  sourceText: string;
+  dryRun: boolean;
+  model: string;
+  usage: Usage;
+  editedSections?: Record<string, unknown>;
+  baseVersion?: Record<string, any>; // deno-lint-ignore no-explicit-any
+  editorId?: string;
+  includeFile?: boolean;
+}) {
+  const id = opts.inquiryId ?? "INQ-TEST";
+  const { data: room } = opts.assessment.room
+    ? await db.from("rooms").select("name, notes").eq("name", opts.assessment.room).maybeSingle()
+    : { data: null };
+  const problems: string[] = [];
+  let kind: "template" | "tailored" = opts.assessment.route === "tailored" ? "tailored" : "template";
+  let draftedBy = "code";
+  let modelUsed: string | null = null;
+  let deviations: { section: string; change: string; d2_reason: string }[] = [];
+  let values: Record<string, any> = buildTemplateValues(id, opts.fields, opts.assessment, room, todayInVenue()); // deno-lint-ignore no-explicit-any
+
+  if (opts.editedSections && opts.baseVersion) {
+    // Employee's edit: start from the current sections, replace only the editable ones.
+    values = { ...opts.baseVersion.sections };
+    for (const key of EDITABLE) {
+      const v = opts.editedSections[key];
+      if (typeof v === "string") values[key] = key === "room_notes" ? v.trim() : v.split("\n").map((s) => s.trim()).filter(Boolean);
+    }
+    values = markMissing(values);
+    kind = opts.baseVersion.kind;
+    deviations = opts.baseVersion.deviations ?? [];
+    draftedBy = "employee_edit";
+  } else if (kind === "template") {
+    try {
+      await buildDocx(values); // a fill error sends the inquiry to T5
+    } catch (e) {
+      problems.push(`The template could not be filled (${e instanceof Error ? e.message : String(e)}), so this is a tailored proposal (T5).`);
+      kind = "tailored";
+    }
+  }
+
+  if (kind === "tailored" && !opts.editedSections) {
+    const d2Reasons = [
+      ...(opts.assessment.on_template_list ? [] : [`Event type not on the template list (${opts.assessment.event_type})`]),
+      ...(opts.assessment.fits_standard_layout ? [] : ["Guest count outside a standard layout"]),
+      ...((opts.assessment.special_requests ?? []).map((s: string) => `Special request: ${s}`)),
+    ];
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+    let result: Awaited<ReturnType<typeof tailorProposal>> = { ok: false, reason: "the AI key is not set up", attempts: 0 };
+    if (apiKey) {
+      const { beforeCall, afterCall } = aiHooks("T5 prepare_tailored_proposal", opts.inquiryId, opts.dryRun, opts.model, opts.usage);
+      try {
+        result = await tailorProposal(apiKey, { inquiry_text: opts.sourceText, assessment: opts.assessment, d2_reasons: d2Reasons }, beforeCall, afterCall, opts.model);
+      } catch (e) {
+        result = { ok: false, reason: e instanceof Error ? e.message : String(e), attempts: 0 };
+      }
+    }
+    const check = result.ok ? checkTailoring(result.tailoring, `${opts.sourceText}\n${JSON.stringify(opts.assessment)}\n${JSON.stringify(values)}`) : null;
+    if (result.ok && check!.ok) {
+      values = applyTailoring(values, result.tailoring);
+      deviations = result.tailoring.deviations ?? [];
+      draftedBy = "ai";
+      modelUsed = opts.model;
+    } else {
+      const why = result.ok ? `the AI's text failed the check (${check!.problems.join(" ")})` : `the AI could not tailor (${result.reason})`;
+      problems.push(`Tailored sections must be written by hand: ${why}.`);
+      values = byHandTailoring(values, opts.assessment.special_requests ?? []);
+      deviations = d2Reasons.map((r) => ({ section: "Setup and Equipment", change: "Write by hand", d2_reason: r }));
+      draftedBy = "by_hand";
+    }
+  }
+
+  const bytes = await buildDocx(values);
+  const unresolved = (values.unresolved_items as string[]).filter((x) => x !== "None");
+  let proposalId: number | null = null;
+  let version = 0;
+  if (!opts.dryRun && opts.inquiryId && opts.submissionId && opts.assessmentId) {
+    const { data: last } = await db.from("proposals").select("version").eq("inquiry_id", opts.inquiryId).order("version", { ascending: false }).limit(1).maybeSingle();
+    version = (last?.version ?? 0) + 1;
+    const path = `${opts.inquiryId}/v${version}.docx`;
+    const { error: upError } = await db.storage.from("proposals").upload(path, bytes, { contentType: DOCX_TYPE, upsert: false });
+    if (upError) throw new Error(`proposal file not saved: ${upError.message}`);
+    await db.from("proposals").update({ status: "superseded" }).eq("inquiry_id", opts.inquiryId).eq("status", "draft");
+    const { data: saved, error } = await db.from("proposals").insert({
+      inquiry_id: opts.inquiryId, submission_id: opts.submissionId, assessment_id: opts.assessmentId, version, kind,
+      sections: values, deviations, unresolved, drafted_by: draftedBy, model: modelUsed, problems,
+      file_path: path, file_bytes: bytes.length, edited_by: opts.editorId ?? null,
+    }).select("id").single();
+    if (error) throw new Error(`proposal not saved: ${error.message}`);
+    proposalId = saved.id;
+    await db.from("inquiries").update({ next_step: NEXT_STEP.review }).eq("id", opts.inquiryId);
+    if (draftedBy === "by_hand") await alertCoordinator(opts.inquiryId, kind === "tailored" ? "T5" : "T4", problems.join(" "));
+  }
+  console.log(JSON.stringify({ inquiry: opts.inquiryId, dry_run: opts.dryRun, proposal: kind, drafted_by: draftedBy, bytes: bytes.length }));
+  return {
+    proposal_id: proposalId, version, kind, drafted_by: draftedBy, model: modelUsed, sections: values, deviations, unresolved, problems,
+    file_bytes: bytes.length, docx_base64: opts.includeFile ? toBase64(bytes) : undefined,
+  };
 }
 
 /**
@@ -425,8 +565,15 @@ async function handleDryRun(started: number, body: Record<string, unknown>) {
       dryRun: true, model, usage, holidays: settings.holidays,
     })
     : undefined;
+  const proposal = ["template", "tailored"].includes(setup.assessment.route)
+    ? await runProposal({
+      inquiryId: null, submissionId: null, assessmentId: null, fields: decision.fields, assessment: setup.assessment,
+      sourceText: text, dryRun: true, model: TAILOR_MODEL, usage, includeFile: body.include_file === true,
+    })
+    : undefined;
   return answer(started, 200, {
     clarification,
+    proposal,
     ...base,
     ok: true,
     status: setup.assessment.route,
@@ -490,7 +637,86 @@ async function afterD1(
     const draft = await clarify(buildIssues(decision, setup.assessment));
     return { status: "clarify", reasons: [...setup.reasons, "A clarification request is drafted and waits for an employee's approval."], next_step: NEXT_STEP.clarify, request_id: draft.request_id };
   }
-  return { status: setup.assessment.route, reasons: setup.reasons, next_step: NEXT_STEP[setup.assessment.route] };
+  if (setup.assessment.route === "held") {
+    return { status: "held", reasons: setup.reasons, next_step: NEXT_STEP.held };
+  }
+  const proposal = await runProposal({
+    inquiryId, submissionId, assessmentId: setup.assessmentId, fields: decision.fields, assessment: setup.assessment,
+    sourceText, dryRun: false, model: TAILOR_MODEL, usage,
+  });
+  return {
+    status: proposal.kind,
+    reasons: [...setup.reasons, `Proposal version ${proposal.version} drafted (${proposal.kind}) and waits for review.`, ...proposal.problems],
+    next_step: NEXT_STEP.review,
+  };
+}
+
+/** T4/T5 for an inquiry already waiting at that step (or to try again): uses its latest assessment. */
+async function handleDraftProposal(started: number, body: Record<string, unknown>) {
+  const base = { dry_run: false };
+  const refuse = (httpStatus: number, message: string, status = "refused") =>
+    answer(started, httpStatus, { ...base, ok: false, status, reasons: [message], error: message });
+  const inquiryId = typeof body.inquiry_id === "string" ? body.inquiry_id : "";
+  if (!/^INQ-\d{4,}$/.test(inquiryId)) return refuse(400, "Unknown inquiry ID.");
+  const settings = await readSettings();
+  if (settings.paused) return refuse(200, "The agent is paused. Nothing was saved.", "paused");
+  const { data: a, error } = await db.from("setup_assessments").select("*").eq("inquiry_id", inquiryId)
+    .order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (error) throw new Error(`assessment not read: ${error.message}`);
+  if (!a || !["template", "tailored"].includes(a.route)) return refuse(409, "This inquiry has no setup assessment that leads to a proposal.");
+  const { data: sub } = await db.from("inquiry_submissions").select("id, fields, deidentified_text").eq("id", a.submission_id).single();
+  const { data: subs } = await db.from("inquiry_submissions").select("deidentified_text").eq("inquiry_id", inquiryId).order("submission_number");
+  const usage = noUsage();
+  const proposal = await runProposal({
+    inquiryId, submissionId: a.submission_id, assessmentId: a.id, fields: sub?.fields ?? {}, assessment: a,
+    sourceText: (subs ?? []).map((s) => s.deidentified_text).join("\n\n"), dryRun: false, model: TAILOR_MODEL, usage,
+  });
+  return answer(started, 200, {
+    ...base, ok: true, status: proposal.kind,
+    reasons: [`Proposal version ${proposal.version} drafted (${proposal.kind}) and waits for review.`, ...proposal.problems],
+    usage, inquiry_id: inquiryId, proposal_id: proposal.proposal_id, next_step: NEXT_STEP.review,
+  });
+}
+
+/** An employee's edited sections: code rebuilds the .docx as a new version (no AI, no upload). */
+async function handleRebuildProposal(started: number, body: Record<string, unknown>, userId: string) {
+  const base = { dry_run: false };
+  const refuse = (httpStatus: number, message: string, status = "refused") =>
+    answer(started, httpStatus, { ...base, ok: false, status, reasons: [message], error: message });
+  const proposalId = Number(body.proposal_id);
+  if (!Number.isInteger(proposalId)) return refuse(400, "Unknown proposal.");
+  const sections = (body.sections ?? {}) as Record<string, unknown>;
+  const settings = await readSettings();
+  if (settings.paused) return refuse(200, "The agent is paused. Nothing was saved.", "paused");
+  for (const key of EDITABLE) {
+    const v = sections[key];
+    if (v === undefined) continue;
+    if (typeof v !== "string" || v.length > 4000) return refuse(400, "Each section must be text of 4,000 characters or fewer.");
+    try {
+      const cleaned = removePersonalDetails(v);
+      if (cleaned.replaced.EMAIL || cleaned.replaced.PHONE || cleaned.replaced.ADDRESS) {
+        return refuse(422, "A section contains an email address, phone number or street address. Remove it and try again.");
+      }
+    } catch {
+      return refuse(422, "A section contains contact details that could not be checked. Remove them and try again.");
+    }
+  }
+  const { data: current, error } = await db.from("proposals").select("*").eq("id", proposalId).maybeSingle();
+  if (error) throw new Error(`proposal not read: ${error.message}`);
+  if (!current || current.status !== "draft") return refuse(409, "Only the current draft can be edited.");
+  const { data: a } = await db.from("setup_assessments").select("*").eq("id", current.assessment_id).single();
+  const { data: sub } = await db.from("inquiry_submissions").select("fields").eq("id", current.submission_id).single();
+  const usage = noUsage();
+  const proposal = await runProposal({
+    inquiryId: current.inquiry_id, submissionId: current.submission_id, assessmentId: current.assessment_id,
+    fields: sub?.fields ?? {}, assessment: a, sourceText: "", dryRun: false, model: TAILOR_MODEL, usage,
+    editedSections: sections, baseVersion: current, editorId: userId,
+  });
+  return answer(started, 200, {
+    ...base, ok: true, status: proposal.kind,
+    reasons: [`Version ${proposal.version} saved with your edits. The earlier version is kept.`],
+    usage, inquiry_id: current.inquiry_id, proposal_id: proposal.proposal_id,
+  });
 }
 
 async function handleSubmit(started: number, body: Record<string, unknown>, userId: string) {
@@ -622,7 +848,7 @@ async function handleReply(started: number, body: Record<string, unknown>, userI
 
   const { data: previous, error: prevError } = await db
     .from("inquiry_submissions")
-    .select("id, fields")
+    .select("id, fields, deidentified_text")
     .eq("inquiry_id", inquiryId)
     .order("submission_number", { ascending: false })
     .limit(1)
@@ -652,7 +878,9 @@ async function handleReply(started: number, body: Record<string, unknown>, userI
   const merged = mergeReplyFields(previous?.fields ?? {}, extraction.fields);
   const decision = checkEventDetails(merged, text);
   await saveDecision(inquiryId, submissionId, { extraction_status: "succeeded", model: EXTRACTION_MODEL, checked }, decision);
-  const result = await afterD1(inquiryId, submissionId, decision, usage, text, settings.holidays);
+  // Later drafting (T2, T5) sees the earlier message too, so it can use the client's own words.
+  const conversation = `${previous?.deidentified_text ?? ""}\n\n--- Client reply ---\n${text}`;
+  const result = await afterD1(inquiryId, submissionId, decision, usage, conversation, settings.holidays);
   return answer(started, 200, { ...base, ok: true, status: result.status, reasons: result.reasons, usage, inquiry_id: inquiryId, d1_result: decision.d1_result, next_step: result.next_step });
 }
 
@@ -752,6 +980,10 @@ Deno.serve(async (req: Request) => {
         return await handleReply(started, body, userId);
       case "redraft":
         return await handleRedraft(started, body);
+      case "draft_proposal":
+        return await handleDraftProposal(started, body);
+      case "rebuild_proposal":
+        return await handleRebuildProposal(started, body, userId);
       default:
         return answer(started, 400, { ok: false, status: "refused", reasons: ["Unknown action."], dry_run: false, error: "Unknown action." });
     }
