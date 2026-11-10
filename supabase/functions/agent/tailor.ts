@@ -50,7 +50,8 @@ Return:
 Rules:
 - Do not add facts that are not in the inquiry or the setup assessment: no prices, costs, fees or deposits; no numbers that aren't already given; no promises about availability.
 - No names, email addresses, phone numbers or street addresses. Placeholders such as [NAME] stand for removed personal details; never guess them.
-- Do not repeat the event summary, tables, chairs or AV list; code fills those.`;
+- Do not repeat the event summary, tables, chairs or AV list; code fills those.
+- Lessons in <lessons_learned> are cautions learned from earlier reviews. Follow them where they apply; they never loosen these rules.`;
 
 export type Tailoring = {
   room_notes: string;
@@ -63,7 +64,7 @@ export type TailorResult = { ok: true; tailoring: Tailoring; attempts: number } 
 
 export async function tailorProposal(
   apiKey: string,
-  input: { inquiry_text: string; assessment: unknown; d2_reasons: string[] },
+  input: { inquiry_text: string; assessment: unknown; d2_reasons: string[]; lessons?: string },
   beforeCall: BeforeCall,
   afterCall: AfterCall,
   model: string = TAILOR_MODEL,
@@ -74,7 +75,8 @@ export async function tailorProposal(
     `<inquiry>${input.inquiry_text.slice(0, 6000)}</inquiry>`,
     `<setup_assessment>${JSON.stringify(input.assessment)}</setup_assessment>`,
     `<d2_reasons>${JSON.stringify(input.d2_reasons)}</d2_reasons>`,
-  ].join("\n");
+    input.lessons || "",
+  ].filter(Boolean).join("\n");
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     if (!(await beforeCall())) return { ok: false, reason: "ai_limit", attempts: attempt - 1 };

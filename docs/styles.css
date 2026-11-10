@@ -196,3 +196,8 @@ td.nowrap { white-space: nowrap; }
 h3 { font-size: 16px; margin: 18px 0 6px; }
 details { margin: 12px 0; }
 summary { cursor: pointer; color: var(--accent); }
+
+/* Group 5: one review inside the review card; the overdue flag on the dashboard. */
+.card.inset { box-shadow: none; margin: 12px 0; padding: 12px 14px; }
+.card.inset h4 { margin: 12px 0 4px; }
+.overdue { color: var(--bad-text); font-weight: 600; }

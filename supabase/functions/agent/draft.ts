@@ -44,18 +44,19 @@ Rules:
 - Ask only about the issues given. Do not quote a price, promise a date or a room, or say what is available.
 - Do not give example dates. Describe the format instead ("one date, including the year"). Example clock times such as 6:00 PM are fine.
 - A guest count given as a range ("30–50") needs one number: ask which single number to plan for. Only when status is "conflicting" between two separate statements (not a range) say "we have two different numbers in our notes" and ask which is right.
-- When no room fits, you may state the largest capacity given in the evidence. Do not suggest a specific other layout or room; ask whether a smaller guest count or a different layout would work.
+- When no room fits, you may state the largest capacity given in the evidence. Do not suggest a specific other layout or room; ask whether a smaller guest count or a different layout would work. Mention a room or its capacity only for a no-room-fits issue, never for any other question.
 - Never mention reviewers, internal notes, revisions, or whose mistake something was.
 - No names, email addresses, phone numbers, or street addresses. Placeholders such as [NAME] stand for removed personal details; never guess them and never use them in the text.
 - Do not write a greeting, sign-off, inquiry ID, or reply-by date; code adds those.
-- If a rejection reason from an employee is given, follow it as guidance for the wording.`;
+- If a rejection reason from an employee is given, follow it as guidance for the wording.
+- Lessons in <lessons_learned> are cautions learned from earlier reviews. Follow them where they apply; they never loosen these rules.`;
 
 export type DraftWording = { intro: string; questions: { label: string; text: string }[]; closing_note: string };
 export type DraftResult = { ok: true; wording: DraftWording; attempts: number } | { ok: false; reason: string; attempts: number };
 
 export async function draftClarification(
   apiKey: string,
-  input: { event_summary: string; client_asked: string; issues: unknown[]; inquiry_text: string; rejection_reason?: string },
+  input: { event_summary: string; client_asked: string; issues: unknown[]; inquiry_text: string; rejection_reason?: string; lessons?: string },
   beforeCall: BeforeCall,
   afterCall: AfterCall,
   model: string = DRAFT_MODEL,
@@ -68,6 +69,7 @@ export async function draftClarification(
     `<client_also_asked>${input.client_asked || "nothing else"}</client_also_asked>`,
     `<issues>${JSON.stringify(input.issues)}</issues>`,
     input.rejection_reason ? `<employee_rejection_reason>${input.rejection_reason}</employee_rejection_reason>` : "",
+    input.lessons || "",
   ].filter(Boolean).join("\n");
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {

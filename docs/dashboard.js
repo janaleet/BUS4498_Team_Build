@@ -18,6 +18,20 @@
     list.replaceChildren(notice("bad", "Could not load inquiries", "Reload the page. If it keeps happening, tell the event coordinator."));
     return;
   }
+  // T6: a draft waiting for review longer than 10 minutes is flagged.
+  const waiting = data.filter((row) => row.next_step === "t6_review").map((row) => row.id);
+  const since = {};
+  if (waiting.length) {
+    const { data: drafts } = await sb.from("proposals").select("inquiry_id, created_at").eq("status", "draft").in("inquiry_id", waiting);
+    for (const d of drafts || []) since[d.inquiry_id] = d.created_at;
+  }
+  const nextStepCell = (row) => {
+    const text = LABELS.nextStep[row.next_step] || row.next_step;
+    const minutes = since[row.id] ? Math.floor((Date.now() - new Date(since[row.id]).getTime()) / 60000) : 0;
+    return minutes > 10
+      ? [text, el("div", { class: "overdue", text: `Review overdue: waiting ${minutes >= 120 ? `${Math.floor(minutes / 60)} h` : `${minutes} min`} (limit 10 min)` })]
+      : [text];
+  };
   if (data.length === 0) {
     list.replaceChildren(el("p", { class: "empty", text: "No inquiries yet." }));
     return;
@@ -34,7 +48,7 @@
       el("td", { "data-label": "Received", class: "nowrap", text: formatDateTime(row.created_at) }),
       el("td", { "data-label": "Status", text: LABELS.status[row.status] || row.status }),
       el("td", { "data-label": "Details (D1)" }, d1Badge(row)),
-      el("td", { "data-label": "Next step", text: LABELS.nextStep[row.next_step] || row.next_step }),
+      el("td", { "data-label": "Next step" }, ...nextStepCell(row)),
       el("td", {}, row.d1_result ? reportProblemButton(row.id, "D1 decision and extracted details") : null),
     )))));
 })();

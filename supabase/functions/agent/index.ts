@@ -2,7 +2,8 @@
 // Carries out T1 · Review supplied event details, D1 (Sufficient event details?),
 // T3 · Identify event setup needs, D2 (Use template?), T2 · Prepare clarification
 // request (drafts only; an employee approves and sends), T4 · Prepare template proposal
-// and T5 · Prepare tailored proposal. Later groups add T6 review and T7 revision.
+// and T5 · Prepare tailored proposal, then after each T6 review (D3 runs in the database)
+// T7 · Revise proposal packet or a new T2 draft, and the lessons the agent learns.
 //
 // GET  -> status check; calls no AI and saves nothing.
 // POST -> JSON body:
@@ -16,7 +17,11 @@
 //     { "action": "redraft", "request_id", "by_hand"?: bool }          new T2 draft after a rejection
 //     { "action": "draft_proposal", "inquiry_id" }                     T4/T5 for an inquiry at that step
 //     { "action": "rebuild_proposal", "proposal_id", "sections" }      employee's edited sections, rebuilt by code
-//   Test mode may also send "include_file": true to get the proposal .docx back as base64.
+//     { "action": "process_review", "review_id" }   after a T6 review: lesson, then T7 or T2 (D3 ran in the database)
+//     { "action": "learn_rejection", "request_id" }  lesson from a rejected clarification draft
+//   Test mode may also send "include_file": true to get the proposal .docx back as base64, and
+//   "review": { "outcome": "needs_revision" | "needs_clarification", "comments" } to try T7 / T2
+//   and the lesson on the drafted proposal (nothing is saved).
 // Every answer has ok, status (one word), reasons, dry_run, ms, and usage.
 // Final statuses: template (-> T4), tailored (-> T5), clarify (-> T2), held (a person decides),
 // paused, refused.
@@ -38,6 +43,10 @@ import {
   applyTailoring, buildTemplateValues, byHandTailoring, checkTailoring, EDITABLE, fillDocumentXml, markMissing,
 } from "./proposal.js";
 import { TAILOR_MODEL, tailorProposal } from "./tailor.ts";
+import { REVISE_MODEL, reviseProposal } from "./revise.ts";
+import { issuesFromConflicts, issuesFromReview, lessonsApplied, lessonsBlock } from "./revise.js";
+import { LESSON_MODEL, MAX_LESSONS, writeLesson } from "./lessons.ts";
+import { normalizeEventType } from "./setup.js";
 
 const MAX_TEXT_LENGTH = 20_000;
 // Models test mode may compare. Add the models runtime/test-plan.md lists under
@@ -50,6 +59,8 @@ const NEXT_STEP: Record<string, string> = {
   clarify: "t2_clarification",
   held: "held_setup_shortage",
   review: "t6_review",
+  revision: "t7_revision",
+  handoff: "t6_handoff",
 };
 const DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
@@ -195,6 +206,58 @@ function extractionHeldReason(reason: string) {
   return `The AI could not read this inquiry (${reason}). Enter the six details by hand.`;
 }
 
+type Lesson = { id: number; lesson: string };
+
+/**
+ * The relevant lessons (memory rule 6): active, this topic, for every event or this event
+ * type, newest first, at most 10. Checked as still switched on when read (memory rule 12).
+ */
+async function loadLessons(topic: string, eventType: string): Promise<Lesson[]> {
+  const { data, error } = await db.from("lessons").select("id, lesson, event_type, active")
+    .eq("active", true).eq("topic", topic).order("created_at", { ascending: false }).limit(50);
+  if (error) {
+    console.error("lessons not read", error.message);
+    return [];
+  }
+  return (data ?? [])
+    .filter((l) => l.active && (!l.event_type || l.event_type === eventType))
+    .slice(0, MAX_LESSONS)
+    .map((l) => ({ id: l.id, lesson: l.lesson }));
+}
+
+/**
+ * Learn one lesson from a trusted outcome with a typed reason. One lesson per outcome
+ * (the database refuses a second). Returns the lesson text, or why none was saved.
+ */
+async function learnLesson(opts: {
+  learnedFrom: string;
+  outcome: "needs_revision" | "needs_clarification" | "rejected";
+  topic: "clarification request" | "proposal";
+  reason: string;
+  inquiryId: string;
+  eventType: string;
+  dryRun: boolean;
+  usage: Usage;
+}): Promise<{ lesson?: string; problem?: string }> {
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+  if (!apiKey) return { problem: "the AI key is not set up" };
+  if (!opts.dryRun) {
+    const { data: existing } = await db.from("lessons").select("id").eq("learned_from", opts.learnedFrom).eq("outcome", opts.outcome).maybeSingle();
+    if (existing) return { problem: "a lesson from this outcome already exists" };
+  }
+  const { beforeCall, afterCall } = aiHooks("Lesson learn_lesson", opts.dryRun ? null : opts.inquiryId, opts.dryRun, LESSON_MODEL, opts.usage);
+  const written = await writeLesson(apiKey, { topic: opts.topic, outcome: opts.outcome, reason: opts.reason, eventType: opts.eventType }, beforeCall, afterCall);
+  if (!written.ok) return { problem: written.reason };
+  if (!opts.dryRun) {
+    const { error } = await db.from("lessons").insert({
+      lesson: written.lesson, topic: opts.topic, event_type: written.specific && opts.eventType ? opts.eventType : null,
+      learned_from: opts.learnedFrom, outcome: opts.outcome, inquiry_id: opts.inquiryId, reason: opts.reason.slice(0, 2000), model: LESSON_MODEL,
+    });
+    if (error) return { problem: `not saved (${error.message})` };
+  }
+  return { lesson: written.lesson };
+}
+
 /**
  * T3 + D2: read the active rooms, let the AI sort the client's AV and special requests,
  * then decide room, tables, chairs, AV and the route in code. Saves the assessment
@@ -336,8 +399,10 @@ async function runProposal(opts: {
   baseVersion?: Record<string, any>; // deno-lint-ignore no-explicit-any
   editorId?: string;
   includeFile?: boolean;
+  revision?: { model: string; lessonsApplied: string[] };
 }) {
   const id = opts.inquiryId ?? "INQ-TEST";
+  let lessonsUsed: string[] = opts.revision?.lessonsApplied ?? [];
   const { data: room } = opts.assessment.room
     ? await db.from("rooms").select("name, notes").eq("name", opts.assessment.room).maybeSingle()
     : { data: null };
@@ -349,16 +414,18 @@ async function runProposal(opts: {
   let values: Record<string, any> = buildTemplateValues(id, opts.fields, opts.assessment, room, todayInVenue()); // deno-lint-ignore no-explicit-any
 
   if (opts.editedSections && opts.baseVersion) {
-    // Employee's edit: start from the current sections, replace only the editable ones.
+    // Employee's edit or a T7 revision: start from the current sections, replace only the editable ones.
     values = { ...opts.baseVersion.sections };
     for (const key of EDITABLE) {
       const v = opts.editedSections[key];
       if (typeof v === "string") values[key] = key === "room_notes" ? v.trim() : v.split("\n").map((s) => s.trim()).filter(Boolean);
+      else if (Array.isArray(v)) values[key] = v.map((s) => String(s).trim()).filter((s) => s && s !== "None");
     }
     values = markMissing(values);
     kind = opts.baseVersion.kind;
     deviations = opts.baseVersion.deviations ?? [];
-    draftedBy = "employee_edit";
+    draftedBy = opts.revision ? "revision" : "employee_edit";
+    if (opts.revision) modelUsed = opts.revision.model;
   } else if (kind === "template") {
     try {
       await buildDocx(values); // a fill error sends the inquiry to T5
@@ -376,10 +443,12 @@ async function runProposal(opts: {
     ];
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
     let result: Awaited<ReturnType<typeof tailorProposal>> = { ok: false, reason: "the AI key is not set up", attempts: 0 };
+    const lessons = await loadLessons("proposal", String(opts.assessment.event_type ?? ""));
+    lessonsUsed = lessonsApplied(lessons);
     if (apiKey) {
       const { beforeCall, afterCall } = aiHooks("T5 prepare_tailored_proposal", opts.inquiryId, opts.dryRun, opts.model, opts.usage);
       try {
-        result = await tailorProposal(apiKey, { inquiry_text: opts.sourceText, assessment: opts.assessment, d2_reasons: d2Reasons }, beforeCall, afterCall, opts.model);
+        result = await tailorProposal(apiKey, { inquiry_text: opts.sourceText, assessment: opts.assessment, d2_reasons: d2Reasons, lessons: lessonsBlock(lessons) }, beforeCall, afterCall, opts.model);
       } catch (e) {
         result = { ok: false, reason: e instanceof Error ? e.message : String(e), attempts: 0 };
       }
@@ -405,6 +474,8 @@ async function runProposal(opts: {
   let version = 0;
   if (!opts.dryRun && opts.inquiryId && opts.submissionId && opts.assessmentId) {
     const { data: last } = await db.from("proposals").select("version").eq("inquiry_id", opts.inquiryId).order("version", { ascending: false }).limit(1).maybeSingle();
+    const { data: inq } = await db.from("inquiries").select("revision_round").eq("id", opts.inquiryId).single();
+    const round = Math.min(Number(inq?.revision_round ?? 0), 2);
     version = (last?.version ?? 0) + 1;
     const path = `${opts.inquiryId}/v${version}.docx`;
     const { error: upError } = await db.storage.from("proposals").upload(path, bytes, { contentType: DOCX_TYPE, upsert: false });
@@ -414,6 +485,7 @@ async function runProposal(opts: {
       inquiry_id: opts.inquiryId, submission_id: opts.submissionId, assessment_id: opts.assessmentId, version, kind,
       sections: values, deviations, unresolved, drafted_by: draftedBy, model: modelUsed, problems,
       file_path: path, file_bytes: bytes.length, edited_by: opts.editorId ?? null,
+      revision_round: round, lessons_applied: lessonsUsed,
     }).select("id").single();
     if (error) throw new Error(`proposal not saved: ${error.message}`);
     proposalId = saved.id;
@@ -423,6 +495,7 @@ async function runProposal(opts: {
   console.log(JSON.stringify({ inquiry: opts.inquiryId, dry_run: opts.dryRun, proposal: kind, drafted_by: draftedBy, bytes: bytes.length }));
   return {
     proposal_id: proposalId, version, kind, drafted_by: draftedBy, model: modelUsed, sections: values, deviations, unresolved, problems,
+    lessons_applied: lessonsUsed,
     file_bytes: bytes.length, docx_base64: opts.includeFile ? toBase64(bytes) : undefined,
   };
 }
@@ -454,6 +527,8 @@ async function runClarification(opts: {
   const problems: string[] = [];
   let draftedBy = "checklist";
   let draft = assembleDraft(id, deadline, checklistWording(opts.issues));
+  const eventType = opts.fields.event_type?.status === "found" ? normalizeEventType(opts.fields.event_type.value) : "";
+  const lessons = await loadLessons("clarification request", eventType);
 
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
   if (opts.byHand) {
@@ -470,6 +545,7 @@ async function runClarification(opts: {
         issues: opts.issues.map((i) => ({ label: i.label, status: i.status, client_said: i.known, evidence: i.evidence, usable_answer: i.usable_answer })),
         inquiry_text: opts.sourceText,
         rejection_reason: opts.rejectionReason,
+        lessons: lessonsBlock(lessons),
       }, beforeCall, afterCall, opts.model);
     } catch (e) {
       result = { ok: false, reason: e instanceof Error ? e.message : String(e), attempts: 0 };
@@ -505,6 +581,7 @@ async function runClarification(opts: {
       model: draftedBy === "ai" ? opts.model : null,
       draft_problems: problems,
       redraft_of: opts.redraftOf ?? null,
+      lessons_applied: draftedBy === "ai" ? lessonsApplied(lessons) : [],
     }).select("id").single();
     if (error) throw new Error(`clarification draft not saved: ${error.message}`);
     requestId = data.id;
@@ -521,6 +598,7 @@ async function runClarification(opts: {
     problems,
     check,
     issues: opts.issues,
+    lessons_applied: draftedBy === "ai" ? lessonsApplied(lessons) : [],
   };
 }
 
@@ -574,7 +652,38 @@ async function handleDryRun(started: number, body: Record<string, unknown>) {
       sourceText: text, dryRun: true, model: TAILOR_MODEL, usage, includeFile: body.include_file === true,
     })
     : undefined;
+
+  // Test mode for T6 → D3 → T7 / T2 and the lesson, on the proposal just drafted (nothing saved).
+  let review: Record<string, unknown> | undefined;
+  const asked = body.review as { outcome?: string; comments?: string } | undefined;
+  if (proposal && asked && ["needs_revision", "needs_clarification"].includes(String(asked.outcome)) && String(asked.comments ?? "").trim().length >= 3) {
+    const comments = String(asked.comments).slice(0, 4000);
+    const lesson = await learnLesson({
+      learnedFrom: "proposal_review:0", outcome: asked.outcome as "needs_revision", topic: "proposal", reason: comments,
+      inquiryId: "INQ-TEST", eventType: String(setup.assessment.event_type ?? ""), dryRun: true, usage,
+    });
+    if (asked.outcome === "needs_clarification") {
+      const draft = await runClarification({
+        issues: issuesFromReview(comments), fields: decision.fields, sourceText: text, inquiryId: null, submissionId: null,
+        dryRun: true, model, usage, holidays: settings.holidays,
+      });
+      review = { route: "t2", lesson, clarification: draft };
+    } else {
+      const { lessons, result } = await runRevision({
+        inquiryId: null, review: { outcome: "needs_revision", comments, checklist: {} }, sections: proposal.sections,
+        fields: decision.fields, assessment: setup.assessment, inquiryText: text, dryRun: true, usage,
+      });
+      const clarify = result.status === "blocked"
+        ? await runClarification({
+          issues: issuesFromConflicts(result.conflicts), fields: decision.fields, sourceText: text, inquiryId: null, submissionId: null,
+          dryRun: true, model, usage, holidays: settings.holidays,
+        })
+        : undefined;
+      review = { route: "t7", lesson, revision: { ...result, lessons_applied: lessonsApplied(lessons) }, clarification: clarify };
+    }
+  }
   return answer(started, 200, {
+    review,
     clarification,
     proposal,
     ...base,
@@ -917,6 +1026,149 @@ async function handleRedraft(started: number, body: Record<string, unknown>) {
   });
 }
 
+/** T7 on one proposal: load the proposal lessons, then run the bounded revision. */
+async function runRevision(opts: {
+  inquiryId: string | null;
+  review: { outcome: string; comments: string; checklist: unknown };
+  sections: Record<string, unknown>;
+  fields: Record<string, unknown>;
+  assessment: Record<string, any>; // deno-lint-ignore no-explicit-any
+  inquiryText: string;
+  dryRun: boolean;
+  usage: Usage;
+}) {
+  const lessons = await loadLessons("proposal", String(opts.assessment.event_type ?? ""));
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+  if (!apiKey) {
+    return { lessons, result: { status: "handoff" as const, subtasks: [], summary: "undetermined", evidence: "", unresolved: [], handoff_note: "The AI key is not set up.", ai_calls: 0, ms: 0, conflicts: [] } };
+  }
+  const { beforeCall, afterCall } = aiHooks("T7 revise_proposal_packet", opts.inquiryId, opts.dryRun, REVISE_MODEL, opts.usage);
+  const result = await reviseProposal(apiKey, {
+    review: opts.review, sections: opts.sections, fields: opts.fields, assessment: opts.assessment, inquiryText: opts.inquiryText, lessons,
+  }, beforeCall, afterCall);
+  console.log(JSON.stringify({ inquiry: opts.inquiryId, dry_run: opts.dryRun, t7: result.status, calls: result.ai_calls, ms: result.ms }));
+  return { lessons, result };
+}
+
+/**
+ * After a T6 review (D3 already ran in record_review): learn a lesson from the reason, then
+ * run T7 (Needs revision) or draft a clarification request (Needs clarification). Runs once
+ * per review; a failure frees the review so it can be tried again.
+ */
+async function handleProcessReview(started: number, body: Record<string, unknown>) {
+  const base = { dry_run: false };
+  const refuse = (httpStatus: number, message: string, status = "refused") =>
+    answer(started, httpStatus, { ...base, ok: false, status, reasons: [message], error: message });
+  const reviewId = Number(body.review_id);
+  if (!Number.isInteger(reviewId)) return refuse(400, "Unknown review.");
+  const settings = await readSettings();
+  if (settings.paused) return refuse(200, "The agent is paused. The review is saved; run the next step once Paused is off.", "paused");
+
+  // Claim the review so T7 never runs twice for it.
+  const { data: review, error } = await db.from("proposal_reviews").update({ processed_at: new Date().toISOString() })
+    .eq("id", reviewId).is("processed_at", null).select("*").maybeSingle();
+  if (error) throw new Error(`review not read: ${error.message}`);
+  if (!review) return refuse(409, "This review has already been handled.");
+
+  try {
+    const usage = noUsage();
+    const reasons: string[] = [];
+    const { data: proposal } = await db.from("proposals").select("*").eq("id", review.proposal_id).single();
+    const { data: assessment } = await db.from("setup_assessments").select("*").eq("id", proposal.assessment_id).single();
+    const { data: sub } = await db.from("inquiry_submissions").select("fields").eq("id", proposal.submission_id).single();
+    const { data: subs } = await db.from("inquiry_submissions").select("deidentified_text").eq("inquiry_id", review.inquiry_id).order("submission_number");
+    const inquiryText = (subs ?? []).map((s) => s.deidentified_text).join("\n\n--- Client reply ---\n");
+    const fields = sub?.fields ?? {};
+
+    const learned = await learnLesson({
+      learnedFrom: `proposal_review:${review.id}`, outcome: review.outcome, topic: "proposal", reason: review.comments,
+      inquiryId: review.inquiry_id, eventType: String(assessment?.event_type ?? ""), dryRun: false, usage,
+    });
+    reasons.push(learned.lesson ? `Lesson learned: "${learned.lesson}"` : `No lesson saved (${learned.problem}).`);
+
+    if (review.routed_to === "t2") {
+      const draft = await runClarification({
+        issues: issuesFromReview(review.comments), fields, sourceText: inquiryText, inquiryId: review.inquiry_id,
+        submissionId: proposal.submission_id, dryRun: false, model: DRAFT_MODEL, usage, holidays: settings.holidays,
+      });
+      reasons.unshift("A clarification request is drafted from the review and waits for an employee's approval.");
+      return answer(started, 200, { ...base, ok: true, status: "clarify", reasons, usage, inquiry_id: review.inquiry_id, request_id: draft.request_id });
+    }
+    if (review.routed_to !== "t7") {
+      return answer(started, 200, { ...base, ok: true, status: review.routed_to, reasons, usage, inquiry_id: review.inquiry_id });
+    }
+
+    // T7
+    const saveRun = async (run: Record<string, unknown>) => {
+      const { error: runError } = await db.from("revision_runs").insert({ inquiry_id: review.inquiry_id, review_id: review.id, base_proposal_id: proposal.id, model: REVISE_MODEL, ...run });
+      if (runError) throw new Error(`revision run not saved: ${runError.message}`);
+    };
+    if (proposal.status !== "draft") {
+      await saveRun({ status: "handoff", handoff_note: "The proposal changed after the review, so T7 did not run. Review the current version." });
+      await db.from("inquiries").update({ next_step: NEXT_STEP.handoff }).eq("id", review.inquiry_id);
+      return answer(started, 200, { ...base, ok: true, status: "handoff", reasons: ["The proposal changed after the review, so T7 did not run.", ...reasons], usage, inquiry_id: review.inquiry_id });
+    }
+    const { lessons, result } = await runRevision({
+      inquiryId: review.inquiry_id, review, sections: proposal.sections, fields, assessment, inquiryText, dryRun: false, usage,
+    });
+    const runRow = {
+      status: result.status, subtasks: result.subtasks, summary: result.summary, evidence: result.evidence, unresolved: result.unresolved,
+      handoff_note: result.handoff_note, ai_calls: result.ai_calls, ms: result.ms, lessons_applied: lessonsApplied(lessons),
+    };
+    if (result.status === "revised") {
+      const revised = await runProposal({
+        inquiryId: review.inquiry_id, submissionId: proposal.submission_id, assessmentId: proposal.assessment_id, fields, assessment,
+        sourceText: inquiryText, dryRun: false, model: REVISE_MODEL, usage, editedSections: result.sections, baseVersion: proposal,
+        revision: { model: REVISE_MODEL, lessonsApplied: lessonsApplied(lessons) },
+      });
+      await saveRun({ ...runRow, new_proposal_id: revised.proposal_id });
+      reasons.unshift(`Revised — ready for human review: version ${revised.version}. ${result.summary}`);
+      return answer(started, 200, { ...base, ok: true, status: "revised", reasons, usage, inquiry_id: review.inquiry_id, proposal_id: revised.proposal_id });
+    }
+    if (result.status === "blocked") {
+      await saveRun(runRow);
+      const draft = await runClarification({
+        issues: issuesFromConflicts(result.conflicts), fields, sourceText: inquiryText, inquiryId: review.inquiry_id,
+        submissionId: proposal.submission_id, dryRun: false, model: DRAFT_MODEL, usage, holidays: settings.holidays,
+      });
+      reasons.unshift(`Blocked — clarification required. ${result.unresolved.join(" ")} A clarification request is drafted and waits for approval.`);
+      return answer(started, 200, { ...base, ok: true, status: "blocked", reasons, usage, inquiry_id: review.inquiry_id, request_id: draft.request_id });
+    }
+    await saveRun(runRow);
+    await db.from("inquiries").update({ next_step: NEXT_STEP.handoff }).eq("id", review.inquiry_id);
+    await alertCoordinator(review.inquiry_id, "T7", result.handoff_note);
+    reasons.unshift(`T7 handed the proposal back: ${result.handoff_note}`);
+    return answer(started, 200, { ...base, ok: true, status: "handoff", reasons, usage, inquiry_id: review.inquiry_id });
+  } catch (e) {
+    await db.from("proposal_reviews").update({ processed_at: null }).eq("id", reviewId);
+    throw e;
+  }
+}
+
+/** A lesson from an employee's rejection of a clarification draft (with its typed reason). */
+async function handleLearnRejection(started: number, body: Record<string, unknown>) {
+  const base = { dry_run: false };
+  const refuse = (httpStatus: number, message: string, status = "refused") =>
+    answer(started, httpStatus, { ...base, ok: false, status, reasons: [message], error: message });
+  const requestId = Number(body.request_id);
+  if (!Number.isInteger(requestId)) return refuse(400, "Unknown message.");
+  const settings = await readSettings();
+  if (settings.paused) return refuse(200, "The agent is paused. No lesson was learned.", "paused");
+  const { data: rejected } = await db.from("clarification_requests").select("id, inquiry_id, submission_id, status, reject_reason").eq("id", requestId).maybeSingle();
+  if (!rejected || rejected.status !== "rejected" || !rejected.reject_reason) return refuse(409, "Only a rejected draft with a reason teaches a lesson.");
+  const { data: sub } = await db.from("inquiry_submissions").select("fields").eq("id", rejected.submission_id).single();
+  const et = sub?.fields?.event_type;
+  const usage = noUsage();
+  const learned = await learnLesson({
+    learnedFrom: `clarification_request:${rejected.id}`, outcome: "rejected", topic: "clarification request", reason: rejected.reject_reason,
+    inquiryId: rejected.inquiry_id, eventType: et?.status === "found" ? normalizeEventType(et.value) : "", dryRun: false, usage,
+  });
+  return answer(started, 200, {
+    ...base, ok: true, status: learned.lesson ? "learned" : "not_learned",
+    reasons: [learned.lesson ? `Lesson learned: "${learned.lesson}"` : `No lesson saved (${learned.problem}).`], usage, inquiry_id: rejected.inquiry_id,
+  });
+}
+
 /** The signed-in staff member's user id, or null. */
 async function signedInStaff(req: Request): Promise<string | null> {
   const token = req.headers.get("x-user-token") ?? "";
@@ -987,6 +1239,10 @@ Deno.serve(async (req: Request) => {
         return await handleDraftProposal(started, body);
       case "rebuild_proposal":
         return await handleRebuildProposal(started, body, userId);
+      case "process_review":
+        return await handleProcessReview(started, body);
+      case "learn_rejection":
+        return await handleLearnRejection(started, body);
       default:
         return answer(started, 400, { ok: false, status: "refused", reasons: ["Unknown action."], dry_run: false, error: "Unknown action." });
     }

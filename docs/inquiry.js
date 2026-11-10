@@ -33,7 +33,11 @@
       sb.from("clarification_requests").select("*").eq("inquiry_id", id).order("id", { ascending: false }),
       sb.from("staff_members").select("user_id, display_name"),
     ]);
-    const { data: proposals } = await sb.from("proposals").select("*").eq("inquiry_id", id).order("version", { ascending: false });
+    const [{ data: proposals }, { data: reviews }, { data: runs }] = await Promise.all([
+      sb.from("proposals").select("*").eq("inquiry_id", id).order("version", { ascending: false }),
+      sb.from("proposal_reviews").select("*").eq("inquiry_id", id).order("id", { ascending: false }),
+      sb.from("revision_runs").select("*").eq("inquiry_id", id).order("id", { ascending: false }),
+    ]);
     staffNames = Object.fromEntries((staff || []).map((s) => [s.user_id, s.display_name]));
     if (error || !inquiry) {
       content.replaceChildren(notice("bad", "Inquiry not found", "Check the inquiry ID, or open it from the dashboard."));
@@ -58,6 +62,7 @@
     }
     if ((proposals && proposals.length) || ["t4_template_proposal", "t5_tailored_proposal"].includes(inquiry.next_step)) {
       parts.push(proposalCard(inquiry, proposals || []));
+      if ((proposals || []).length) parts.push(reviewCard(inquiry, proposals || [], reviews || [], runs || []));
     }
     if (sub && sub.flags && sub.flags.length) {
       parts.push(el("section", { class: "card" },
@@ -227,8 +232,14 @@
             status.replaceChildren(notice("bad", "Add a reason", "Say why the draft isn't right (at least 3 characters)."));
             return;
           }
-          run(reject, "Rejecting…", () => rpcAction("reject_clarification", { p_id: r.id, p_reason: reason.value.trim() },
-            "Rejected", "Choose Redraft to have the AI write a new draft using your reason, or write it from the checklist."));
+          run(reject, "Rejecting…", async () => {
+            const okSaved = await rpcAction("reject_clarification", { p_id: r.id, p_reason: reason.value.trim() },
+              "Rejected", "Choose Redraft to have the AI write a new draft using your reason, or write it from the checklist.");
+            if (!okSaved) return;
+            // The agent learns one lesson from the reason (memory plan).
+            const learned = await callFunction("agent", { action: "learn_rejection", request_id: r.id });
+            message.append(notice(learned.ok && learned.status === "learned" ? "ok" : "warn", "Lesson", (learned.reasons || [learned.error || ""]).join(" ")));
+          });
         });
         parts.push(
           el("p", { class: "hint", text: `Reply-by date in this draft: ${fmtDate(r.deadline)}. Approving resets it to 3 business days from today. You may edit the wording; the inquiry ID, the reply-by date and the reply line must stay, and no contact details may be added.` }),
@@ -345,12 +356,13 @@
    */
   function proposalCard(inquiry, proposals) {
     const status = el("div");
-    const current = proposals.find((p) => p.status === "draft");
+    const released = proposals.find((p) => p.status === "released");
+    const current = released || proposals.find((p) => p.status === "draft");
     const section = el("section", { class: "card" }, el("h2", { style: "margin-top:0", text: "T4/T5 · Proposal" }));
 
-    const download = async (p, button) => {
+    const download = async (p, button, name) => {
       button.disabled = true;
-      const { data, error } = await sb.storage.from("proposals").createSignedUrl(p.file_path, 60, { download: `${id}-proposal-v${p.version}.docx` });
+      const { data, error } = await sb.storage.from("proposals").createSignedUrl(p.file_path, 60, { download: name || `${id}-proposal-v${p.version}.docx` });
       button.disabled = false;
       if (error || !data) { status.replaceChildren(notice("bad", "Download didn't start", error ? error.message : "")); return; }
       location.href = data.signedUrl;
@@ -373,14 +385,19 @@
       const s = current.sections || {};
       const lines = (v) => (Array.isArray(v) ? v : [v]).filter(Boolean);
       const kindBadge = el("span", { class: `badge ${current.kind === "template" ? "sufficient" : "neutral"}`, text: current.kind === "template" ? "Template (T4)" : "Tailored (T5)" });
-      const by = { code: "filled by code", ai: `tailored sections by ${current.model}`, by_hand: "tailored sections need writing by hand", employee_edit: `edited by ${who(current.edited_by)}` }[current.drafted_by];
-      const dl = el("button", { type: "button", text: `Download .docx (version ${current.version})` });
-      dl.addEventListener("click", () => download(current, dl));
+      const by = { code: "filled by code", ai: `tailored sections by ${current.model}`, by_hand: "tailored sections need writing by hand", employee_edit: `edited by ${who(current.edited_by)}`, revision: `revised by T7 (${current.model})` }[current.drafted_by];
+      const dl = el("button", { type: "button", text: released ? "Download the final proposal (.docx)" : `Download .docx (version ${current.version})` });
+      dl.addEventListener("click", () => download(current, dl, released ? `${id}-proposal-final.docx` : null));
       section.append(
-        el("div", { class: "switch-row" }, kindBadge, el("span", { class: "hint", text: `Version ${current.version}, ${by}, ${formatDateTime(current.created_at)}` })),
-        current.problems && current.problems.length ? notice("warn", "Needs attention", current.problems.join(" ")) : "",
+        el("div", { class: "switch-row" }, kindBadge, released ? el("span", { class: "badge sufficient", text: "Released" }) : "",
+          el("span", { class: "hint", text: `Version ${current.version}, ${by}, ${formatDateTime(current.created_at)} · revision round ${current.revision_round} of 2` })),
+        released ? notice("ok", "Ready for release", `Released by ${who(current.released_by)} on ${formatDateTime(current.released_at)}. Download it, add the client's name and contact details and the venue's details in Word, and send it yourself. The app never sends proposals.`) : "",
+        current.problems && current.problems.length && !released ? notice("warn", "Needs attention", current.problems.join(" ")) : "",
         el("div", { class: "actions" }, dl),
-        el("p", { class: "hint", text: "Next: Task 6, review (coming in Group 5). Before sending, the employee adds the client's name and the venue's details in Word." }));
+        released ? "" : el("p", { class: "hint", text: "Next: Task 6, review below. Before sending, the employee adds the client's name and the venue's details in Word." }),
+        current.lessons_applied && current.lessons_applied.length
+          ? el("details", {}, el("summary", { text: `Lessons applied (${current.lessons_applied.length})` }), el("ul", {}, current.lessons_applied.map((l) => el("li", { text: l }))))
+          : "");
       const rows = [
         ["Event", `${s.event_type} · ${s.event_date} · ${s.start_time} – ${s.end_time} · ${s.guest_count} guests · ${s.layout}`],
         ["Room", `${s.room}`], ["Room notes", lines(s.room_notes)], ["Tables", lines(s.tables)], ["Chairs", s.chairs],
@@ -396,7 +413,13 @@
           el("ul", {}, current.deviations.map((d) => el("li", { text: `${d.section}: ${d.change} — because ${d.d2_reason}` }))));
       }
 
-      // Edit the tailored sections by hand; code rebuilds the file.
+      // Edit the tailored sections by hand; code rebuilds the file (not once released).
+      if (released) {
+        const olderR = proposals.filter((p) => p !== current);
+        if (olderR.length) section.append(el("p", { class: "hint", text: `${olderR.length} earlier version(s) are kept.` }));
+        section.append(status, reportProblemButton(id, "T4/T5 proposal"));
+        return section;
+      }
       const asText = (v) => lines(v).filter((x) => x !== "None").join("\n");
       const inputs = {};
       const form = el("div", {});
@@ -436,6 +459,127 @@
         }))));
     }
     section.append(status, reportProblemButton(id, "T4/T5 proposal"));
+    return section;
+  }
+
+  /**
+   * T6 · Review and D3: the quality checklist and the three outcomes for the current draft
+   * (a recorded click; D3 runs in the database), then the earlier reviews with what T7 did.
+   */
+  function reviewCard(inquiry, proposals, reviews, runs) {
+    const status = el("div");
+    const section = el("section", { class: "card" }, el("h2", { style: "margin-top:0", text: "T6 · Review and D3 · Review outcome" }));
+    const draft = proposals.find((p) => p.status === "draft");
+    const released = proposals.find((p) => p.status === "released");
+    const OUTCOME = { ready: "Ready for release", needs_revision: "Needs revision", needs_clarification: "Needs clarification" };
+    const ROUTE = { release: "released", t7: "sent to T7 for revision", t2: "sent to T2 for a clarification request", coordinator: "stopped for the event coordinator (third Needs revision)" };
+    const RUN = { revised: "Revised — ready for human review", blocked: "Blocked — clarification required", handoff: "Handed back to the reviewer" };
+    const stopped = ["stopped_no_response", "stopped_coordinator_review"].includes(inquiry.status);
+
+    const processReview = async (reviewId, button) => {
+      if (button) { button.disabled = true; button.textContent = "Working (T7 can take a few minutes)…"; }
+      const result = await callFunction("agent", { action: "process_review", review_id: reviewId });
+      if (!result.ok) {
+        status.replaceChildren(notice(result.status === "paused" ? "warn" : "bad", "Next step not run", result.error || (result.reasons || []).join(" ")));
+        if (button) { button.disabled = false; button.textContent = "Run the next step"; }
+        return;
+      }
+      message.replaceChildren(notice("ok", "Next step done", (result.reasons || []).join(" ")));
+      await load();
+    };
+
+    if (inquiry.status === "stopped_coordinator_review") {
+      section.append(notice("warn", "Stopped – coordinator review", "A third Needs revision came after 2 revision rounds. T7 did not run; the event coordinator decides what happens next."));
+    }
+    if (released) {
+      section.append(notice("ok", "Released", "This proposal passed review. Download it from the proposal card above."));
+    } else if (draft && !stopped && !reviews.some((r) => r.proposal_id === draft.id)) {
+      const items = [
+        ["sections_complete", "Every section is complete (event, room, tables, chairs, AV, setup)"],
+        ["matches_event_details", "It matches the client's details (Required details below)"],
+        ["matches_setup", "It matches the setup list (Setup needs card above)"],
+        ["unresolved_visible", "Every unresolved item and assumption is shown"],
+        ["no_personal_details", "No client names, email addresses, phone numbers or street addresses"],
+      ];
+      const boxes = {};
+      const list = el("div", {});
+      for (const [key, label] of items) {
+        boxes[key] = el("input", { id: `chk-${key}`, type: "checkbox" });
+        list.append(el("label", { class: "check", for: boxes[key].id }, boxes[key], el("span", { text: label })));
+      }
+      const comments = el("textarea", { id: "review-comments", class: "short", maxlength: "4000",
+        placeholder: "What needs to change, or what to ask the client (one missing detail per line). No contact details." });
+      const ready = el("button", { type: "button", text: "Ready for release", disabled: true });
+      const revise = el("button", { type: "button", class: "secondary", text: "Needs revision" });
+      const clarify = el("button", { type: "button", class: "secondary", text: "Needs clarification" });
+      const allTicked = () => items.every(([k]) => boxes[k].checked);
+      Object.values(boxes).forEach((b) => b.addEventListener("change", () => { ready.disabled = !allTicked(); }));
+      const record = async (outcome, button) => {
+        if (outcome !== "ready" && comments.value.trim().length < 3) {
+          comments.focus();
+          status.replaceChildren(notice("bad", "Add a reason", "Say what needs to change (at least 3 characters)."));
+          return;
+        }
+        [ready, revise, clarify].forEach((b) => { b.disabled = true; });
+        const checklist = Object.fromEntries(items.map(([k]) => [k, boxes[k].checked]));
+        const { data, error } = await sb.rpc("record_review", { p_proposal_id: draft.id, p_outcome: outcome, p_checklist: checklist, p_comments: comments.value });
+        if (error) {
+          status.replaceChildren(notice("bad", "Review not saved", error.message));
+          [revise, clarify].forEach((b) => { b.disabled = false; });
+          ready.disabled = !allTicked();
+          return;
+        }
+        if (data.routed_to === "release") {
+          message.replaceChildren(notice("ok", "Ready for release", "The final proposal is saved under this inquiry ID for download."));
+          await load();
+          return;
+        }
+        message.replaceChildren(notice("ok", `Review saved: ${OUTCOME[outcome]}`, `D3: ${ROUTE[data.routed_to]}.`));
+        await processReview(data.id, button);
+      };
+      ready.addEventListener("click", () => record("ready", ready));
+      revise.addEventListener("click", () => record("needs_revision", revise));
+      clarify.addEventListener("click", () => record("needs_clarification", clarify));
+      section.append(
+        el("p", { class: "hint", text: `Version ${draft.version} · revision round ${inquiry.revision_round} of 2 · waiting since ${formatDateTime(draft.created_at)}. Compare the proposal with the Setup needs card and the Required details on this page.` }),
+        inquiry.revision_round >= 2 ? notice("warn", "Last revision round", "Another Needs revision stops this inquiry for the event coordinator; T7 won't run again.") : "",
+        el("h3", { text: "Quality checklist" }), list,
+        el("label", { for: comments.id, text: "Reason (needed for Needs revision or Needs clarification)" }), comments,
+        el("div", { class: "actions" }, ready, revise, clarify),
+        el("p", { class: "hint", text: "Ready for release needs every box ticked. Nothing is sent to the client." }));
+    } else if (draft && !stopped) {
+      section.append(el("p", { class: "hint", text: "This version has been reviewed. See below." }));
+    }
+
+    if (reviews.length) {
+      section.append(el("h3", { text: "Reviews" }));
+      for (const r of reviews) {
+        const p = proposals.find((x) => x.id === r.proposal_id);
+        const run = runs.find((x) => x.review_id === r.id);
+        const item = el("div", { class: "card inset" },
+          el("div", { class: "switch-row" },
+            el("span", { class: `badge ${r.outcome === "ready" ? "sufficient" : r.outcome === "needs_revision" ? "conflicting" : "missing"}`, text: OUTCOME[r.outcome] }),
+            el("span", { class: "hint", text: `Version ${p ? p.version : "?"} · round ${r.revision_round} · by ${who(r.reviewed_by)} on ${formatDateTime(r.reviewed_at)} · ${ROUTE[r.routed_to]}` })),
+          r.comments ? el("p", { text: `"${r.comments}"` }) : "");
+        if (!r.processed_at && !stopped) {
+          const again = el("button", { type: "button", text: "Run the next step" });
+          again.addEventListener("click", () => processReview(r.id, again));
+          item.append(notice("warn", "Next step not run yet", "The review is saved, but the agent hasn't acted on it (it may have been paused)."), el("div", { class: "actions" }, again));
+        }
+        if (run) {
+          item.append(el("h4", { text: `T7: ${RUN[run.status]}` }),
+            el("ul", {},
+              run.summary && run.summary !== "undetermined" ? el("li", { text: `Summary: ${run.summary}` }) : "",
+              run.evidence ? el("li", { text: `Evidence: ${run.evidence}` }) : "",
+              run.unresolved && run.unresolved.length ? el("li", { text: `Unresolved: ${run.unresolved.join(" ")}` }) : "",
+              run.handoff_note && run.handoff_note !== "Not applicable" ? el("li", { text: `Handoff note: ${run.handoff_note}` }) : "",
+              el("li", { text: `Subtasks: ${run.subtasks.join(", ") || "none"} · ${run.ai_calls} of 8 AI calls · ${Math.round(run.ms / 1000)} s` }),
+              run.lessons_applied && run.lessons_applied.length ? el("li", { text: `Lessons applied: ${run.lessons_applied.join(" · ")}` }) : ""));
+        }
+        section.append(item);
+      }
+    }
+    section.append(status, reportProblemButton(id, "T6 review and T7 revision"));
     return section;
   }
 

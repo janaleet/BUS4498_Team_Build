@@ -33,7 +33,10 @@
       t3_setup_needs: "Task 3 – working out setup needs",
       t4_template_proposal: "Task 4 – template proposal to draft",
       t5_tailored_proposal: "Task 5 – tailored proposal to draft",
-      t6_review: "Task 6 – proposal drafted; review comes in Group 5",
+      t6_review: "Task 6 – proposal waits for review",
+      t7_revision: "Task 7 – revising after review",
+      t6_handoff: "Task 6 – T7 handed it back; edit by hand, then review",
+      released: "Released – download the final proposal",
       held_setup_shortage: "Held – an employee decides about a setup shortage",
       waiting_for_reply: "Waiting for the client's reply",
       stopped: "Stopped",
@@ -128,6 +131,7 @@
     const nav = el("nav", { "aria-label": "Main" }, link("dashboard.html", "Dashboard"),
       isStaff ? link("new-inquiry.html", "New inquiry") : null,
       isStaff ? link("rooms.html", "Rooms") : null,
+      isStaff ? link("lessons.html", "Lessons") : null,
       isStaff ? link("settings.html", "Settings") : null);
     const who = ctx && ctx.user
       ? el("span", { class: "who" },

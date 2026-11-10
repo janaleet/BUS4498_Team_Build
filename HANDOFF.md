@@ -4,7 +4,7 @@
 
 ## What works now
 
-Groups 1 (intake), 2 (setup needs), 3 (clarification requests) and 4 (proposals) are accepted.
+Groups 1 (intake), 2 (setup needs), 3 (clarification requests) and 4 (proposals) are accepted. Group 5 (review, revision, lessons, release) is built and live; it waits for a push and a walkthrough.
 
 - **Website** (GitHub Pages, from the `docs/` folder): https://janaleet.github.io/BUS4498_Team_Build/ — sign-in, Dashboard, New inquiry (paste only), one page per inquiry, Rooms, Settings.
 - **The agent** (Edge Function `agent`):
@@ -16,29 +16,35 @@ Groups 1 (intake), 2 (setup needs), 3 (clarification requests) and 4 (proposals)
   - T4: fills the approved Word template (`our_team_agent/docs/proposal-template.docx`) by code, no AI. An empty value shows [TO CONFIRM] and is listed under Items to Confirm. If the template can't be filled, the inquiry goes to T5.
   - T5: code fills the standard sections; the AI (Claude Sonnet 5.5) writes only the room notes, setup requirements, extra items to confirm and assumptions, plus a list of each change from the template with its D2 reason (shown to reviewers only). Code refuses AI text with a price, contact details or a number not in the inquiry; then the tailored sections say "[TO CONFIRM – write by hand]" and the coordinator is told.
   - Each proposal is saved as a new version (.docx in the private `proposals` storage bucket); earlier versions are kept. On the inquiry page an employee can download it, read the sections, and edit the tailored sections by hand, which saves a new version. Review (T6) comes in Group 5.
+  - T6 + D3: on the inquiry page a staff member ticks the 5-item quality checklist and chooses Ready for release (only with every box ticked), Needs revision or Needs clarification (each needs a reason). D3 runs in the database: Ready → the proposal is released for download (nothing is sent); Needs revision → T7 (rounds 1 and 2); a third Needs revision → Stopped – coordinator review; Needs clarification → a T2 draft, one question per line of the reason.
+  - T7 (Claude Sonnet 5.5): inspects the review, checks it against the client's details, revises only room notes, setup, items to confirm and assumptions, and checks the result — at most 8 AI calls, 10 minutes, 60 s per call, one retry. A conflict with the client's details stops it as Blocked and the question goes to T2; a requested change to the event, room, tables, chairs or AV goes back to a person. Code refuses revised text with prices, contact details, new numbers, or any mention of the review or sources.
+  - Lessons (Claude Haiku 5.5): one cautious sentence learned from each Needs revision / Needs clarification reason and each rejected clarification draft. T2, T5 and T7 read at most 10 matching lessons that are on; each draft lists the lessons it applied. Lessons never expire; switch one off on the Lessons page.
+  - Dashboard: a proposal waiting more than 10 minutes for review is flagged.
 - **Rooms page:** the rooms-and-equipment list the agent reads (starts with the example venue). Every change needs a reason and is recorded.
 - **Off switch:** Settings → Paused. While on, the agent does nothing and calls no AI.
 - **Report a problem** beside each decision; reports appear in Settings.
 - **Test mode:** `dry_run: true` decides as usual and saves nothing.
-- Not built yet: Tasks 6–7, lessons, Gmail, Google Calendar, Google Sheets (Groups 5–6).
+- Not built yet: Gmail, Google Calendar, Google Sheets (Group 6).
 
 ## Where things live
 
 | What | Where |
 | --- | --- |
 | Website | `docs/` (`config.js` holds only the public Project URL and publishable key) |
-| The agent | `supabase/functions/agent/` → Supabase → Edge Functions → `agent` |
+| The agent | `supabase/functions/agent/` → Supabase → Edge Functions → `agent`. Deploy from the repository root: `supabase login` once, then `supabase functions deploy agent --remote=dfmoialxzwlahvvtgsbu --no-verify-jwt --use-api` |
 | Database tables and rules | `supabase/migrations/` (one file per group) |
 | Setup rules in code | `supabase/functions/agent/setup.js` (from `our_team_agent/docs/setup-and-routing-rules.md`, sections 4–5) |
 | Clarification rules in code | `supabase/functions/agent/clarify.js` (layout, deadlines, checks) and `draft.ts` (AI wording) |
 | Proposal rules in code | `supabase/functions/agent/proposal.js` (fills and checks), `tailor.ts` (AI wording for T5), `template_docx.ts` (the template, generated from the .docx — regenerate it if the template changes) |
+| Review, revision and lessons in code | `supabase/functions/agent/revise.ts` (T7 calls) and `revise.js` (its order, limits and checks), `lessons.ts` and `lesson-rules.js`; D3 is `record_review` in the Group 5 migration |
+| Lessons | Website → Lessons (on/off switch with who and when) |
 | Proposal files | Supabase → Storage → `proposals` (private; `INQ-0002/v1.docx`, …) |
 | Daily clock | Supabase → Integrations → Cron → `clarification-clock` (16:00 UTC = 8–9 AM Pacific) |
 | Plans | `our_team_agent/runtime/` |
 | Automated checks | `tests/rules.test.js` (intake), `tests/setup.test.js` (setup needs), `tests/clarify.test.js` (clarification requests) |
 | Test inquiries | `our_team_agent/docs/sample-inquiries/` and `tests/fixtures/` (made-up, labeled SYNTHETIC) |
 
-Tables (Supabase → Table Editor): `staff_members` (who may sign in), `settings` and `settings_history` (switches, limits, holidays), `inquiries` and `inquiry_submissions` (de-identified inquiries and the six details), `rooms` and `room_changes` (the inventory and its history), `setup_assessments` (one T3 assessment and D2 route per inquiry), `proposals` (each proposal version: sections, changes from the template, who edited it, the file's path; one current draft per inquiry), `clarification_requests` (each drafted request or reminder, with who approved, rejected, edited and sent it; the database refuses an unapproved or second send), `coordinator_alerts`, `problem_reports`, `ai_usage` (one row per AI call with tokens; the website can't see it).
+Tables (Supabase → Table Editor): `staff_members` (who may sign in), `settings` and `settings_history` (switches, limits, holidays), `inquiries` and `inquiry_submissions` (de-identified inquiries and the six details), `rooms` and `room_changes` (the inventory and its history), `setup_assessments` (one T3 assessment and D2 route per inquiry), `proposals` (each proposal version: sections, changes from the template, who edited it, the file's path; one current draft per inquiry), `proposal_reviews` (one T6 review per proposal version: checklist, outcome, reason, who, when, where D3 sent it), `revision_runs` (one T7 run per review: subtasks, AI calls, time, result), `lessons` (what the agent learned, its source, on/off), `clarification_requests` (each drafted request or reminder, with who approved, rejected, edited and sent it; the database refuses an unapproved or second send), `coordinator_alerts`, `problem_reports`, `ai_usage` (one row per AI call with tokens; the website can't see it).
 
 ## Secrets
 
@@ -50,18 +56,19 @@ Names only — values live in Supabase → Edge Functions → Secrets, never in 
 ## How to test
 
 - **Status check:** open https://dfmoialxzwlahvvtgsbu.supabase.co/functions/v1/agent — `ready: true` means the agent can run.
-- **Test mode** (saves nothing): POST `{ "dry_run": true, "inquiry": "<inquiry text>" }` to that address with the `apikey` header set to the publishable key. The answer has `status` (`template`, `tailored`, `clarify`, `held`, `paused`, `refused`), `reasons`, `setup`, `clarification` (the draft, for `clarify`), `proposal` (for `template` and `tailored`; add `"include_file": true` to get the .docx as base64), `ms`, and `usage`. Test mode is limited to 50 AI calls a day (Settings).
+- **Test mode** (saves nothing): POST `{ "dry_run": true, "inquiry": "<inquiry text>" }` to that address with the `apikey` header set to the publishable key. The answer has `status` (`template`, `tailored`, `clarify`, `held`, `paused`, `refused`), `reasons`, `setup`, `clarification` (the draft, for `clarify`), `proposal` (for `template` and `tailored`; add `"include_file": true` to get the .docx as base64), and `review` when you also send `"review": { "outcome": "needs_revision" | "needs_clarification", "comments": "…" }` (the lesson, T7's result, and any T2 draft), `ms`, and `usage`. Test mode is limited to 50 AI calls a day (Settings).
 - **On the website:** sign in → New inquiry → paste a sample inquiry → Check for personal details → tick the box → Submit and read with AI. Expected results: `our_team_agent/docs/sample-inquiries/expected-results.md` and `tests/fixtures/expected-results-synthetic.md`.
 - **Automated checks** (no install needed on a Mac):
   - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/rules.test.js`
   - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/setup.test.js`
   - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/clarify.test.js`
   - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/proposal.test.js`
+  - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/review.test.js`
 - **Reset:** test mode saves nothing. Inquiries submitted on the website stay (they never expire, per the memory plan).
 
 ## What's next
 
-Group 5: Task 6 review and D3 sign-off, Task 7 revision, lessons, release download. Then Group 6 (Gmail, Calendar, Sheets). Write `runtime/test-plan.md` in the Agent Builder Kit once the agent runs.
+Group 6: Gmail, Google Calendar, Google Sheets. Write `runtime/test-plan.md` in the Agent Builder Kit once the agent runs.
 
 ## How we take turns
 
