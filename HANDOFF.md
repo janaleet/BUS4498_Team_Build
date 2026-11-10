@@ -4,7 +4,7 @@
 
 ## What works now
 
-Groups 1 (intake), 2 (setup needs) and 3 (clarification requests) are accepted. Group 4 (proposals) is built and live in Supabase; its website card is waiting for a push and a walkthrough.
+Groups 1 (intake), 2 (setup needs), 3 (clarification requests) and 4 (proposals) are accepted.
 
 - **Website** (GitHub Pages, from the `docs/` folder): https://janaleet.github.io/BUS4498_Team_Build/ — sign-in, Dashboard, New inquiry (paste only), one page per inquiry, Rooms, Settings.
 - **The agent** (Edge Function `agent`):

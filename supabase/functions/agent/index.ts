@@ -240,7 +240,10 @@ async function runSetup(
         requests = await flagSetupQuestions(apiKey, {
           av_requests: text("av_requests"),
           special_requests: text("special_requests"),
-          catering: text("catering"),
+          // The client's own sentence too, so the AI can tell who provides the food.
+          catering: text("catering") && (fields.catering as { evidence?: string })?.evidence
+            ? `${text("catering")} (client's words: "${(fields.catering as { evidence?: string }).evidence}")`
+            : text("catering"),
           event_type: text("event_type"),
           setup_list: setupList,
         }, beforeCall, afterCall, model);

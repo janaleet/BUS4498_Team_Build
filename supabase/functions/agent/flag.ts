@@ -57,7 +57,7 @@ av_items: one entry per piece of equipment the client asks the venue to provide.
 
 special_requests: one entry per request that is not venue equipment. covered_by_rules is true only when the fixed rules above already handle it. Examples that are NOT covered (false): a stage, a dance floor, a livestream or video recording, outside vendors who set up or work on site (DJ, band, florist, decorator, caterer's staff) and the space they need, installed decorations, an end time after 11:00 PM. Leave out: a preference for a particular room (the setup list handles rooms), and a client arranging their own food drop-off (that is catering information, not a special request).
 
-venue_catering_requested: true only when the client asks the venue to provide catering, food service, or a food and beverage table; false when the client brings or orders their own food, or says nothing about food.
+venue_catering_requested: true only when the client asks the venue to provide catering, food service, or a food and beverage table; false when the client brings or orders their own food, or says nothing about food. A meal named only as part of the event or its layout ("a seated dinner", "a holiday dinner", "a luncheon") is not a catering request: it is false unless the client also asks the venue to provide or serve the food. Read the client's words in <catering> to tell who provides the food.
 
 questions: short questions for the client about anything unclear in these requests, or [] when nothing is unclear.
 
