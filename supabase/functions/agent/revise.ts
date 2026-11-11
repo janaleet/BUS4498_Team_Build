@@ -188,7 +188,9 @@ export async function reviseProposal(
       const codeProblems = [...check.problems, ...internal];
       state.complete = codeProblems.length ? false : null;
       state.problems = codeProblems;
-      summary = String(out.revision_summary || "").trim();
+      // Keep every pass's summary: a second pass may only see what the first one already added.
+      const passSummary = String(out.revision_summary || "").trim();
+      summary = summary ? `${summary} Second pass: ${passSummary}` : passSummary;
       if (codeProblems.length) evidence.push(`Code check of the revision: ${codeProblems.join(" ")}`);
     } else if (subtask === "check_packet_completeness") {
       state.complete = out.complete === true && state.problems.length === 0;
