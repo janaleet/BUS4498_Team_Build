@@ -102,8 +102,16 @@ export function materialsRow(inquiryId, sections, eventDateIso, releasedAt) {
     list(sections.tables),
     String(sections.chairs || ""),
     list(sections.av_equipment) || "None",
-    String(releasedAt || "").slice(0, 10),
+    venueDate(releasedAt),
   ];
+}
+
+/** The venue-time (Pacific) date of a timestamp, YYYY-MM-DD; "" when there is none. */
+export function venueDate(timestamp) {
+  if (!timestamp) return "";
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat("en-CA", { timeZone: VENUE_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 }
 
 /** A Google error in plain words, and whether the token needs renewing. */

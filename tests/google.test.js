@@ -74,8 +74,9 @@ check("proposal note: add client details in Word", /add their name and contact d
     av_equipment: ["1 × wireless microphone", "1 × speaker system"],
   }, "2027-06-19", "2026-11-11T00:00:07Z");
   check("row matches the header", row.length === LOG_HEADER.length);
-  check("row values", row.join("|") === "2027-06-19|INQ-0002|Grand Ballroom|Banquet|180|23 × sixty-inch round tables; 1 × six-foot registration table|180|1 × wireless microphone; 1 × speaker system|2026-11-11", row.join("|"));
+  check("row values", row.join("|") === "2027-06-19|INQ-0002|Grand Ballroom|Banquet|180|23 × sixty-inch round tables; 1 × six-foot registration table|180|1 × wireless microphone; 1 × speaker system|2026-11-10", row.join("|"));
   check("no AV -> None", materialsRow("INQ-9", { av_equipment: ["None requested"] }, "", "")[7] === "None");
+  check("release date in venue time", materialsRow("INQ-9", {}, "", "2026-11-11T00:00:07Z")[8] === "2026-11-10");
 }
 
 // Google errors in plain words.
