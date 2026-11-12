@@ -4,7 +4,7 @@
 
 ## What works now
 
-Groups 1 (intake), 2 (setup needs), 3 (clarification requests) and 4 (proposals) are accepted. Group 5 (review, revision, lessons, release) is built and live; it waits for a push and a walkthrough.
+Groups 1 (intake), 2 (setup needs), 3 (clarification requests), 4 (proposals) and 5 (review, revision, lessons, release) are accepted. Group 6 (Gmail, Calendar, Sheets) is built and live; it works once Google is connected (see **Connect Google** below).
 
 - **Website** (GitHub Pages, from the `docs/` folder): https://janaleet.github.io/BUS4498_Team_Build/ — sign-in, Dashboard, New inquiry (paste only), one page per inquiry, Rooms, Settings.
 - **The agent** (Edge Function `agent`):
@@ -20,11 +20,14 @@ Groups 1 (intake), 2 (setup needs), 3 (clarification requests) and 4 (proposals)
   - T7 (Claude Sonnet 5.5): inspects the review, checks it against the client's details, revises only room notes, setup, items to confirm and assumptions, and checks the result — at most 8 AI calls, 10 minutes, 60 s per call, one retry. A conflict with the client's details stops it as Blocked and the question goes to T2; a requested change to the event, room, tables, chairs or AV goes back to a person. Code refuses revised text with prices, contact details, new numbers, or any mention of the review or sources.
   - Lessons (Claude Haiku 5.5): one cautious sentence learned from each Needs revision / Needs clarification reason and each rejected clarification draft. T2, T5 and T7 read at most 10 matching lessons that are on; each draft lists the lessons it applied. Lessons never expire; switch one off on the Lessons page.
   - Dashboard: a proposal waiting more than 10 minutes for review is flagged.
+  - Gmail: approving a clarification request or reminder emails it to the approving employee's own inbox; releasing a proposal emails the Word file to the releasing employee. They forward it to the client — the agent never emails a client. Each message is emailed once (database rule), only after the approval or release click, only to staff, at most 20 a day (Settings).
+  - Google Calendar (Task 3): the agent reads the venue calendar's free/busy for the event's date and hours. Booked → held for an employee ("date appears booked"); not connected or failed → "Availability not checked – check the calendar by hand" (never treated as free).
+  - Google Sheets: each released proposal adds one row (event date, inquiry ID, room, layout, guests, tables, chairs, AV, release date) to the "JEvents materials log" sheet the agent creates the first time. One row per inquiry; no client details.
 - **Rooms page:** the rooms-and-equipment list the agent reads (starts with the example venue). Every change needs a reason and is recorded.
 - **Off switch:** Settings → Paused. While on, the agent does nothing and calls no AI.
 - **Report a problem** beside each decision; reports appear in Settings.
 - **Test mode:** `dry_run: true` decides as usual and saves nothing.
-- Not built yet: Gmail, Google Calendar, Google Sheets (Group 6).
+- Not built: nothing from the plan. Customer access was dropped by team decision (employees only).
 
 ## Where things live
 
@@ -39,19 +42,36 @@ Groups 1 (intake), 2 (setup needs), 3 (clarification requests) and 4 (proposals)
 | Review, revision and lessons in code | `supabase/functions/agent/revise.ts` (T7 calls) and `revise.js` (its order, limits and checks), `lessons.ts` and `lesson-rules.js`; D3 is `record_review` in the Group 5 migration |
 | Lessons | Website → Lessons (on/off switch with who and when) |
 | Proposal files | Supabase → Storage → `proposals` (private; `INQ-0002/v1.docx`, …) |
+| Google tools in code | `supabase/functions/agent/google.ts` (calls) and `google.js` (message, free/busy window, log row); database rules in the Group 6 migration (`reserve_email`, `emails`, `materials_log`) |
 | Daily clock | Supabase → Integrations → Cron → `clarification-clock` (16:00 UTC = 8–9 AM Pacific) |
 | Plans | `our_team_agent/runtime/` |
 | Automated checks | `tests/rules.test.js` (intake), `tests/setup.test.js` (setup needs), `tests/clarify.test.js` (clarification requests) |
 | Test inquiries | `our_team_agent/docs/sample-inquiries/` and `tests/fixtures/` (made-up, labeled SYNTHETIC) |
 
-Tables (Supabase → Table Editor): `staff_members` (who may sign in), `settings` and `settings_history` (switches, limits, holidays), `inquiries` and `inquiry_submissions` (de-identified inquiries and the six details), `rooms` and `room_changes` (the inventory and its history), `setup_assessments` (one T3 assessment and D2 route per inquiry), `proposals` (each proposal version: sections, changes from the template, who edited it, the file's path; one current draft per inquiry), `proposal_reviews` (one T6 review per proposal version: checklist, outcome, reason, who, when, where D3 sent it), `revision_runs` (one T7 run per review: subtasks, AI calls, time, result), `lessons` (what the agent learned, its source, on/off), `clarification_requests` (each drafted request or reminder, with who approved, rejected, edited and sent it; the database refuses an unapproved or second send), `coordinator_alerts`, `problem_reports`, `ai_usage` (one row per AI call with tokens; the website can't see it).
+Tables (Supabase → Table Editor): `staff_members` (who may sign in), `settings` and `settings_history` (switches, limits, holidays), `inquiries` and `inquiry_submissions` (de-identified inquiries and the six details), `rooms` and `room_changes` (the inventory and its history), `setup_assessments` (one T3 assessment and D2 route per inquiry), `proposals` (each proposal version: sections, changes from the template, who edited it, the file's path; one current draft per inquiry), `proposal_reviews` (one T6 review per proposal version: checklist, outcome, reason, who, when, where D3 sent it), `revision_runs` (one T7 run per review: subtasks, AI calls, time, result), `lessons` (what the agent learned, its source, on/off), `emails` (each message emailed to an employee: what, to whom, when, Gmail id; never twice), `materials_log` and `google_files` (the Sheets log rows and the sheet), `clarification_requests` (each drafted request or reminder, with who approved, rejected, edited and sent it; the database refuses an unapproved or second send), `coordinator_alerts`, `problem_reports`, `ai_usage` (one row per AI call with tokens; the website can't see it).
 
 ## Secrets
 
 Names only — values live in Supabase → Edge Functions → Secrets, never in this repository.
 
 - `ANTHROPIC_API_KEY` — the AI key for Claude.
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` — the one Google sign-in for Gmail, Calendar and Sheets (scopes `gmail.send`, `calendar.freebusy`, `drive.file`).
 - `SUPABASE_URL`, `SUPABASE_SECRET_KEYS` — provided by Supabase automatically.
+
+## Connect Google (once), and renew it weekly
+
+Do this yourself; never paste a secret into chat. Use a personal Gmail account (a Cal Poly account may need an administrator's consent).
+
+1. Go to https://console.cloud.google.com and create a project (for example "JEvents").
+2. APIs & Services → Library: turn on **Gmail API**, **Google Calendar API** and **Google Sheets API**.
+3. Google Auth Platform (OAuth consent screen): user type **External**; app name "JEvents"; your Gmail as support and developer contact. **Audience**: leave it in **Testing** and add your Gmail as a **test user**. **Data access**: add the scopes `https://www.googleapis.com/auth/gmail.send`, `https://www.googleapis.com/auth/calendar.freebusy` and `https://www.googleapis.com/auth/drive.file`.
+4. **Clients** → Create client → **Web application**. Under Authorized redirect URIs add `https://developers.google.com/oauthplayground`. Copy the client ID and client secret.
+5. Open https://developers.google.com/oauthplayground → gear icon → tick **Use your own OAuth credentials**, paste the client ID and secret, Access type **Offline**. In Step 1 paste the three scope URLs (one per line or space-separated) → **Authorize APIs** → sign in with the test Gmail and allow. In Step 2 click **Exchange authorization code for tokens** and copy the **refresh token**.
+6. Supabase → Edge Functions → Secrets: add `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_REFRESH_TOKEN`.
+7. Google Calendar (same account): create a calendar such as "JEvents venue" → its Settings → **Integrate calendar** → copy the **Calendar ID**. In JEvents → Settings → "Venue Google Calendar ID", paste it with a reason.
+8. JEvents → Settings → Google connection → **Check again** should say Connected.
+
+**Every 7 days** (Testing mode): repeat step 5 and replace `GOOGLE_REFRESH_TOKEN` in Supabase. Until then, Settings shows "Not working", emails and the sheet log fail visibly (with "Email it to me" / "Add to the materials log" to try again), and Task 3 says "Availability not checked".
 
 ## How to test
 
@@ -64,11 +84,12 @@ Names only — values live in Supabase → Edge Functions → Secrets, never in 
   - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/clarify.test.js`
   - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/proposal.test.js`
   - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/review.test.js`
+  - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/google.test.js`
 - **Reset:** test mode saves nothing. Inquiries submitted on the website stay (they never expire, per the memory plan).
 
 ## What's next
 
-Group 6: Gmail, Google Calendar, Google Sheets. Write `runtime/test-plan.md` in the Agent Builder Kit once the agent runs.
+Connect Google and walk through Group 6. Then write `runtime/test-plan.md` in the Agent Builder Kit so the final test round can run. Write `runtime/test-plan.md` in the Agent Builder Kit once the agent runs.
 
 ## How we take turns
 

@@ -38,6 +38,7 @@
       t6_handoff: "Task 6 – T7 handed it back; edit by hand, then review",
       released: "Released – download the final proposal",
       held_setup_shortage: "Held – an employee decides about a setup shortage",
+      held_date_booked: "Held – the venue calendar shows the date booked; an employee decides",
       waiting_for_reply: "Waiting for the client's reply",
       stopped: "Stopped",
     },

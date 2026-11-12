@@ -19,6 +19,10 @@
 //     { "action": "rebuild_proposal", "proposal_id", "sections" }      employee's edited sections, rebuilt by code
 //     { "action": "process_review", "review_id" }   after a T6 review: lesson, then T7 or T2 (D3 ran in the database)
 //     { "action": "learn_rejection", "request_id" }  lesson from a rejected clarification draft
+//     { "action": "email_message", "request_id" }    email an approved clarification request or reminder to the caller
+//     { "action": "email_proposal", "proposal_id" }  email a released proposal (.docx attached) to the caller
+//     { "action": "log_materials", "proposal_id" }   write the released proposal's row to the Google Sheets log
+//     { "action": "google_status" }                  is the Google sign-in working (Settings page)
 //   Test mode may also send "include_file": true to get the proposal .docx back as base64, and
 //   "review": { "outcome": "needs_revision" | "needs_clarification", "comments" } to try T7 / T2
 //   and the lesson on the drafted proposal (nothing is saved).
@@ -47,6 +51,8 @@ import { REVISE_MODEL, reviseProposal } from "./revise.ts";
 import { issuesFromConflicts, issuesFromReview, lessonsApplied, lessonsBlock } from "./revise.js";
 import { LESSON_MODEL, MAX_LESSONS, writeLesson } from "./lessons.ts";
 import { normalizeEventType } from "./setup.js";
+import { appendRow, createLogSheet, freeBusy, gmailSend, googleConfigured, googleStatus } from "./google.ts";
+import { buildRawEmail, eventWindow, forwardNote, isBooked, materialsRow } from "./google.js";
 
 const MAX_TEXT_LENGTH = 20_000;
 // Models test mode may compare. Add the models runtime/test-plan.md lists under
@@ -61,6 +67,7 @@ const NEXT_STEP: Record<string, string> = {
   review: "t6_review",
   revision: "t7_revision",
   handoff: "t6_handoff",
+  booked: "held_date_booked",
 };
 const DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
@@ -258,6 +265,22 @@ async function learnLesson(opts: {
   return { lesson: written.lesson };
 }
 
+/** check_date_availability (T3, plan addition): free/busy on the venue calendar. */
+async function checkAvailability(date: string, start: string, end: string): Promise<{ status: string; note: string }> {
+  const settingRow = await db.from("settings").select("value").eq("key", "venue_calendar_id").maybeSingle();
+  const calendarId = typeof settingRow.data?.value === "string" ? settingRow.data.value.trim() : "";
+  if (!calendarId || !googleConfigured()) {
+    return { status: "not_configured", note: "Availability not checked: the venue calendar isn't connected yet. Check the calendar by hand." };
+  }
+  const window = eventWindow(date, start, end);
+  if (!window) return { status: "not_checked", note: "Availability not checked: the date or times are incomplete. Check the calendar by hand." };
+  const busy = await freeBusy(calendarId, window.timeMin, window.timeMax);
+  if (!busy.ok) return { status: "not_checked", note: `Availability not checked – check the calendar by hand. ${busy.message}` };
+  return isBooked(busy.data, window)
+    ? { status: "booked", note: `Date appears booked: the venue calendar has an event on ${date} between ${start} and ${end}.` }
+    : { status: "free", note: "" };
+}
+
 /**
  * T3 + D2: read the active rooms, let the AI sort the client's AV and special requests,
  * then decide room, tables, chairs, AV and the route in code. Saves the assessment
@@ -318,7 +341,18 @@ async function runSetup(
   }
 
   const assessment = assessSetup(fields, rooms, requests.ok ? requests : null);
-  const reasons = setupReasons(assessment);
+  let reasons = setupReasons(assessment);
+
+  // Google Calendar (read only): is the venue booked during the event's hours? Booked → held
+  // for an employee; the agent never picks another date. A failed check never counts as free.
+  const availability = await checkAvailability(text("event_date"), text("start_time"), text("end_time"));
+  Object.assign(assessment, { availability: availability.status, availability_note: availability.note });
+  if (availability.status === "booked" && assessment.room) {
+    assessment.route = "held";
+    reasons = [availability.note, "Held for an employee to decide; the agent never picks another date."];
+  } else if (availability.note) {
+    reasons = [...reasons, availability.note];
+  }
   const checked = [
     `Rooms: ${rooms.length} active room(s)${rooms.some((r: { is_example: boolean }) => r.is_example) ? " (example venue data)" : ""}`,
     "Rules: room choice, tables, chairs, AV, template list (setup-and-routing-rules.md, sections 4–5)",
@@ -353,12 +387,17 @@ async function runSetup(
       route: assessment.route,
       model: hasRequests && requests.ok ? model : null,
       checked,
+      availability: availability.status,
+      availability_note: availability.note,
     }).select("id").single();
     if (saveError) throw new Error(`setup assessment not saved: ${saveError.message}`);
     assessmentId = saved.id;
-    const { error: stepError } = await db.from("inquiries").update({ next_step: NEXT_STEP[assessment.route] }).eq("id", inquiryId);
+    const booked = availability.status === "booked" && assessment.route === "held";
+    const { error: stepError } = await db.from("inquiries").update({ next_step: booked ? NEXT_STEP.booked : NEXT_STEP[assessment.route] }).eq("id", inquiryId);
     if (stepError) throw new Error(`inquiry not updated: ${stepError.message}`);
-    if (assessment.route === "held") await alertCoordinator(inquiryId, "T3", `Setup held: ${assessment.shortages.join(" ")}`);
+    if (booked) await alertCoordinator(inquiryId, "T3", availability.note);
+    else if (assessment.route === "held") await alertCoordinator(inquiryId, "T3", `Setup held: ${assessment.shortages.join(" ")}`);
+    if (availability.status === "not_checked") await alertCoordinator(inquiryId, "T3", availability.note);
     if (flagFailure) await alertCoordinator(inquiryId, "T3", `Special requests not checked (${flagFailure}); review in T6.`);
   }
   return { assessment, reasons, checked, assessmentId };
@@ -1169,6 +1208,123 @@ async function handleLearnRejection(started: number, body: Record<string, unknow
   });
 }
 
+/** The signed-in employee's own sign-in address: the only place the agent emails. */
+async function staffEmail(userId: string): Promise<string> {
+  const { data } = await db.auth.admin.getUserById(userId);
+  return data?.user?.email ?? "";
+}
+
+/**
+ * send_approved_message: reserve the email in the database (approval or release click,
+ * staff recipient, daily limit, never twice), send it with Gmail to the employee, then
+ * record the result. A failed send frees the message so it can be tried again.
+ */
+async function sendToEmployee(opts: {
+  kind: "clarification_request" | "reminder" | "proposal";
+  sourceId: number;
+  userId: string;
+  subject: string;
+  text: string;
+  attachment?: { filename: string; contentType: string; base64: string };
+}): Promise<{ ok: boolean; message: string }> {
+  const { data: emailId, error } = await db.rpc("reserve_email", { p_kind: opts.kind, p_source_id: opts.sourceId, p_to_user: opts.userId, p_requested_by: opts.userId });
+  if (error) return { ok: false, message: error.message };
+  const to = await staffEmail(opts.userId);
+  let raw = "";
+  try {
+    raw = buildRawEmail({ to, subject: opts.subject, text: opts.text, attachment: opts.attachment ?? null });
+  } catch (e) {
+    await db.from("emails").update({ status: "failed", error: e instanceof Error ? e.message : String(e) }).eq("id", emailId);
+    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+  }
+  const sent = await gmailSend(raw);
+  if (!sent.ok) {
+    await db.from("emails").update({ status: "failed", error: sent.message }).eq("id", emailId);
+    return { ok: false, message: sent.message };
+  }
+  await db.from("emails").update({ status: "sent", gmail_message_id: sent.data.id, sent_at: new Date().toISOString() }).eq("id", emailId);
+  return { ok: true, message: `Emailed to your inbox (${to}). Forward it from there; nothing went to the client.` };
+}
+
+/** Email an approved clarification request or reminder to the employee who asks. */
+async function handleEmailMessage(started: number, body: Record<string, unknown>, userId: string) {
+  const base = { dry_run: false };
+  const refuse = (httpStatus: number, message: string, status = "refused") =>
+    answer(started, httpStatus, { ...base, ok: false, status, reasons: [message], error: message });
+  const requestId = Number(body.request_id);
+  if (!Number.isInteger(requestId)) return refuse(400, "Unknown message.");
+  const settings = await readSettings();
+  if (settings.paused) return refuse(200, "The agent is paused. Nothing was emailed; copy the message instead.", "paused");
+  const { data: r } = await db.from("clarification_requests").select("id, inquiry_id, kind, status, subject, body").eq("id", requestId).maybeSingle();
+  if (!r) return refuse(404, "Unknown message.");
+  const kind = r.kind === "reminder" ? "reminder" : "clarification_request";
+  const result = await sendToEmployee({
+    kind, sourceId: r.id, userId, subject: r.subject,
+    text: `${forwardNote(kind, r.inquiry_id)}\n\n---\n\nSubject: ${r.subject}\n\n${r.body}`,
+  });
+  return answer(started, 200, { ...base, ok: result.ok, status: result.ok ? "emailed" : "not_emailed", reasons: [result.message], error: result.ok ? undefined : result.message, inquiry_id: r.inquiry_id });
+}
+
+/** Email a released proposal, with its .docx attached, to the employee who asks. */
+async function handleEmailProposal(started: number, body: Record<string, unknown>, userId: string) {
+  const base = { dry_run: false };
+  const refuse = (httpStatus: number, message: string, status = "refused") =>
+    answer(started, httpStatus, { ...base, ok: false, status, reasons: [message], error: message });
+  const proposalId = Number(body.proposal_id);
+  if (!Number.isInteger(proposalId)) return refuse(400, "Unknown proposal.");
+  const settings = await readSettings();
+  if (settings.paused) return refuse(200, "The agent is paused. Nothing was emailed; download the proposal instead.", "paused");
+  const { data: p } = await db.from("proposals").select("id, inquiry_id, status, file_path").eq("id", proposalId).maybeSingle();
+  if (!p || p.status !== "released") return refuse(409, "Only a released proposal can be emailed.");
+  const { data: file, error } = await db.storage.from("proposals").download(p.file_path);
+  if (error || !file) return refuse(500, "The proposal file could not be read. Download it instead.");
+  const result = await sendToEmployee({
+    kind: "proposal", sourceId: p.id, userId, subject: `${p.inquiry_id} – Released event proposal`,
+    text: forwardNote("proposal", p.inquiry_id),
+    attachment: { filename: `${p.inquiry_id}-proposal.docx`, contentType: DOCX_TYPE, base64: toBase64(new Uint8Array(await file.arrayBuffer())) },
+  });
+  return answer(started, 200, { ...base, ok: result.ok, status: result.ok ? "emailed" : "not_emailed", reasons: [result.message], error: result.ok ? undefined : result.message, inquiry_id: p.inquiry_id });
+}
+
+/**
+ * log_materials: one row in the Google Sheets materials log per released proposal. The agent
+ * creates the sheet the first time (drive.file: it can only use its own files).
+ */
+async function handleLogMaterials(started: number, body: Record<string, unknown>) {
+  const base = { dry_run: false };
+  const refuse = (httpStatus: number, message: string, status = "refused") =>
+    answer(started, httpStatus, { ...base, ok: false, status, reasons: [message], error: message });
+  const proposalId = Number(body.proposal_id);
+  if (!Number.isInteger(proposalId)) return refuse(400, "Unknown proposal.");
+  const settings = await readSettings();
+  if (settings.paused) return refuse(200, "The agent is paused. Nothing was logged.", "paused");
+  const { data: p } = await db.from("proposals").select("id, inquiry_id, status, sections, submission_id, released_at").eq("id", proposalId).maybeSingle();
+  if (!p || p.status !== "released") return refuse(409, "Only a released proposal is logged.");
+  const { data: sub } = await db.from("inquiry_submissions").select("fields").eq("id", p.submission_id).single();
+  const eventDate = sub?.fields?.event_date?.status === "found" ? String(sub.fields.event_date.value) : "";
+  const row = materialsRow(p.inquiry_id, p.sections ?? {}, eventDate, p.released_at);
+
+  // Claim the inquiry's one log row (the database refuses a second).
+  const { data: claim, error: claimError } = await db.from("materials_log").insert({ inquiry_id: p.inquiry_id, proposal_id: p.id, row_values: row }).select("id").single();
+  if (claimError) return refuse(409, claimError.code === "23505" ? "This proposal is already in the materials log." : `Not logged (${claimError.message}).`);
+  const fail = async (message: string) => {
+    await db.from("materials_log").update({ status: "failed", error: message }).eq("id", claim.id);
+    return answer(started, 200, { ...base, ok: false, status: "not_logged", reasons: [message], error: message, inquiry_id: p.inquiry_id });
+  };
+
+  let { data: sheet } = await db.from("google_files").select("file_id, url").eq("key", "materials_log").maybeSingle();
+  if (!sheet) {
+    const created = await createLogSheet();
+    if (!created.ok) return await fail(created.message);
+    sheet = { file_id: created.data.spreadsheetId, url: created.data.spreadsheetUrl };
+    await db.from("google_files").insert({ key: "materials_log", file_id: sheet.file_id, url: sheet.url });
+  }
+  const appended = await appendRow(sheet.file_id, row);
+  if (!appended.ok) return await fail(appended.message);
+  await db.from("materials_log").update({ status: "written", updated_range: appended.data.updates?.updatedRange ?? null }).eq("id", claim.id);
+  return answer(started, 200, { ...base, ok: true, status: "logged", reasons: ["Added to the materials log in Google Sheets."], inquiry_id: p.inquiry_id, sheet_url: sheet.url });
+}
+
 /** The signed-in staff member's user id, or null. */
 async function signedInStaff(req: Request): Promise<string | null> {
   const token = req.headers.get("x-user-token") ?? "";
@@ -1243,6 +1399,17 @@ Deno.serve(async (req: Request) => {
         return await handleProcessReview(started, body);
       case "learn_rejection":
         return await handleLearnRejection(started, body);
+      case "email_message":
+        return await handleEmailMessage(started, body, userId);
+      case "email_proposal":
+        return await handleEmailProposal(started, body, userId);
+      case "log_materials":
+        return await handleLogMaterials(started, body);
+      case "google_status": {
+        const status = await googleStatus();
+        const { data: sheet } = await db.from("google_files").select("url").eq("key", "materials_log").maybeSingle();
+        return answer(started, 200, { ok: true, status: status.ok ? "connected" : "not_connected", reasons: [status.message], dry_run: false, google: status, sheet_url: sheet?.url ?? null });
+      }
       default:
         return answer(started, 400, { ok: false, status: "refused", reasons: ["Unknown action."], dry_run: false, error: "Unknown action." });
     }

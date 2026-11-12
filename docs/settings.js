@@ -2,7 +2,7 @@
 // limit, test runs per day, and holidays. Changes go through change_setting, which
 // requires a reason and records who and when.
 (async function () {
-  const { sb, el, notice, formatDateTime, requireStaff, renderHeader, showPausedBanner } = window.JEvents;
+  const { sb, el, notice, formatDateTime, requireStaff, renderHeader, showPausedBanner, callFunction } = window.JEvents;
   const page = document.getElementById("page");
   const ctx = await requireStaff(page);
   renderHeader("settings.html", ctx);
@@ -58,6 +58,12 @@
           }
           change(row.key, n, reason, status);
         } })));
+    } else if (row.kind === "text") {
+      const input = el("input", { id: `value-${row.key}`, type: "text", maxlength: "200", value: String(row.value || ""),
+        placeholder: "name@group.calendar.google.com" });
+      control = el("div", {},
+        el("label", { for: input.id, text: "Value (leave empty to switch the check off)" }), input,
+        el("div", { class: "actions" }, el("button", { type: "button", text: "Save", onclick: () => change(row.key, input.value.trim(), reason, status) })));
     } else {
       const dates = Array.isArray(row.value) ? row.value : [];
       const input = el("input", { id: `value-${row.key}`, type: "date" });
@@ -84,14 +90,15 @@
   }
 
   async function render() {
-    const order = ["paused", "ai_daily_run_limit", "test_runs_per_day", "holidays"];
+    const order = ["paused", "ai_daily_run_limit", "test_runs_per_day", "email_daily_limit", "venue_calendar_id", "holidays"];
     const { data, error } = await sb.from("settings").select("key, label, kind, value, reason, changed_by, changed_at");
     if (error) {
       holder.replaceChildren(notice("bad", "Could not load settings", "Reload the page."));
       return;
     }
     data.sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
-    holder.replaceChildren(...data.map(card));
+    holder.replaceChildren(googleCard(), ...data.map(card));
+    refreshGoogle();
 
     const { data: history } = await sb.from("settings_history").select("key, old_value, new_value, reason, changed_at")
       .order("changed_at", { ascending: false }).limit(50);
@@ -100,6 +107,25 @@
           el("strong", { text: h.key }), ` ${JSON.stringify(h.old_value)} → ${JSON.stringify(h.new_value)} · `,
           el("span", { class: "quote", text: h.reason }), el("span", { class: "note", text: ` · ${formatDateTime(h.changed_at)}` }))))
       : el("p", { class: "empty", text: "No changes yet." }));
+  }
+
+  // Google connection (Gmail, Calendar, Sheets): the secrets live in Supabase, never here.
+  const googleSlot = el("div", {}, el("p", { class: "empty", text: "Checking the Google connection…" }));
+  function googleCard() {
+    const again = el("button", { type: "button", class: "secondary", text: "Check again", onclick: refreshGoogle });
+    return el("section", { class: "card" },
+      el("h2", { style: "margin-top:0", text: "Google connection (Gmail, Calendar, Sheets)" }),
+      el("p", { class: "hint", text: "The sign-in is three secrets in Supabase → Edge Functions → Secrets (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN). In Google's Testing mode the token expires after 7 days; HANDOFF.md says how to renew it." }),
+      googleSlot, el("div", { class: "actions" }, again));
+  }
+  async function refreshGoogle() {
+    const result = await callFunction("agent", { action: "google_status" });
+    const g = result.google || {};
+    googleSlot.replaceChildren(
+      notice(g.ok ? "ok" : g.configured ? "bad" : "warn", g.ok ? "Connected" : g.configured ? "Not working" : "Not connected", (result.reasons || [result.error || ""]).join(" ")),
+      result.sheet_url
+        ? el("p", {}, "Materials log: ", el("a", { href: result.sheet_url, target: "_blank", rel: "noopener", text: "open the Google Sheet" }))
+        : el("p", { class: "hint", text: "The materials log sheet is created the first time a proposal is released." }));
   }
 
   async function renderReports() {

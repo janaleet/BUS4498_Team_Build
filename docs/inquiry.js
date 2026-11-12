@@ -22,6 +22,8 @@
   const OPTIONAL = ["room_preference", "av_requests", "catering", "special_requests", "budget"];
   const LAYOUTS = ["theater", "classroom", "banquet", "reception", "boardroom"];
   let staffNames = {};
+  let emails = [];
+  let logRows = [];
   const who = (userId) => staffNames[userId] || "a staff member";
 
   async function load() {
@@ -33,11 +35,15 @@
       sb.from("clarification_requests").select("*").eq("inquiry_id", id).order("id", { ascending: false }),
       sb.from("staff_members").select("user_id, display_name"),
     ]);
-    const [{ data: proposals }, { data: reviews }, { data: runs }] = await Promise.all([
+    const [{ data: proposals }, { data: reviews }, { data: runs }, { data: emailRows }, { data: logs }] = await Promise.all([
       sb.from("proposals").select("*").eq("inquiry_id", id).order("version", { ascending: false }),
       sb.from("proposal_reviews").select("*").eq("inquiry_id", id).order("id", { ascending: false }),
       sb.from("revision_runs").select("*").eq("inquiry_id", id).order("id", { ascending: false }),
+      sb.from("emails").select("*").eq("inquiry_id", id).order("id", { ascending: false }),
+      sb.from("materials_log").select("*").eq("inquiry_id", id).order("id", { ascending: false }),
     ]);
+    emails = emailRows || [];
+    logRows = logs || [];
     staffNames = Object.fromEntries((staff || []).map((s) => [s.user_id, s.display_name]));
     if (error || !inquiry) {
       content.replaceChildren(notice("bad", "Inquiry not found", "Check the inquiry ID, or open it from the dashboard."));
@@ -125,6 +131,17 @@
   }
 
   /** T3 setup needs and the D2 decision. */
+  /** Google Calendar result for the event's date and hours (Task 3). */
+  function availabilityLine(a) {
+    const AV = {
+      free: ["sufficient", "Calendar: free"],
+      booked: ["conflicting", "Calendar: date appears booked"],
+      not_checked: ["missing", "Calendar: not checked"],
+      not_configured: ["neutral", "Calendar: not connected"],
+    }[a.availability || "not_checked"];
+    return el("p", {}, el("span", { class: `badge ${AV[0]}`, text: AV[1] }), a.availability_note ? ` ${a.availability_note}` : "");
+  }
+
   function setupCard(a) {
     const routeClass = { template: "sufficient", tailored: "neutral", clarify: "missing", held: "failed" }[a.route];
     const statusBadge = (s) => el("span", { class: `badge ${s === "needed" ? "found" : s === "unknown" ? "conflicting" : "neutral"}`, text: s });
@@ -145,6 +162,7 @@
       el("p", {}, a.room
         ? `Recommended room: ${a.room} (${a.layout} capacity ${a.room_capacity}) for ${a.guest_count} guests.`
         : `No room recommended for ${a.guest_count} guests in a ${a.layout} layout.`),
+      availabilityLine(a),
       el("div", { class: "table-wrap" }, el("table", { class: "stack-sm" },
         el("thead", {}, el("tr", {}, ["Item", "Quantity", "Status", "Source"].map((h) => el("th", { text: h })))),
         el("tbody", {}, rows.map((r) => el("tr", {},
@@ -211,6 +229,25 @@
       return true;
     };
 
+    /** Email an approved message to the signed-in employee (never to the client). */
+    async function emailMessage(requestId) {
+      const result = await callFunction("agent", { action: "email_message", request_id: requestId });
+      message.append(notice(result.ok ? "ok" : "warn", result.ok ? "Emailed to you" : "Not emailed", (result.reasons || [result.error || ""]).join(" ") +
+        (result.ok ? "" : " You can copy the message below instead.")));
+      await load();
+    }
+
+    function emailFacts(r) {
+      const kind = r.kind === "reminder" ? "reminder" : "clarification_request";
+      const mine = emails.filter((e) => e.kind === kind && e.source_id === r.id);
+      const sent = mine.find((e) => e.status === "sent");
+      if (sent) return el("p", { class: "hint", text: `Emailed to ${who(sent.to_user)}'s inbox on ${formatDateTime(sent.sent_at)}.` });
+      const failed = mine.find((e) => e.status === "failed");
+      const button = el("button", { type: "button", class: "secondary", text: "Email it to me" });
+      button.addEventListener("click", () => run(button, "Emailing…", () => emailMessage(r.id)));
+      return el("div", {}, failed ? notice("warn", "Not emailed", failed.error || "") : "", el("div", { class: "actions" }, button));
+    }
+
     function messageView(r) {
       const parts = [el("div", { class: "switch-row" }, el("h3", { style: "margin:0", text: r.kind === "reminder" ? "Reminder" : "Clarification request" }), badge(r.status))];
       if (r.drafted_by !== "ai" && r.draft_problems && r.draft_problems.length && r.status === "draft") {
@@ -222,9 +259,12 @@
         body.value = r.body;
         const reason = el("input", { id: `why-${r.id}`, type: "text", maxlength: "500", placeholder: "Why is this draft not right?" });
         const approve = el("button", { type: "button", text: "Approve" });
-        approve.addEventListener("click", () => run(approve, "Approving…", () => rpcAction("approve_clarification",
-          { p_id: r.id, p_subject: subject.value, p_body: body.value },
-          "Approved", "Copy it, send it from your own email with the client's name added, then click Mark as sent.")));
+        approve.addEventListener("click", () => run(approve, "Approving…", async () => {
+          const okSaved = await rpcAction("approve_clarification", { p_id: r.id, p_subject: subject.value, p_body: body.value },
+            "Approved", "Forward it to the client from your own email with their name added, then click Mark as sent.");
+          if (!okSaved) return;
+          await emailMessage(r.id);
+        }));
         const reject = el("button", { type: "button", class: "secondary", text: "Reject" });
         reject.addEventListener("click", () => {
           if (reason.value.trim().length < 3) {
@@ -274,7 +314,8 @@
         const sent = el("button", { type: "button", text: "Mark as sent" });
         sent.addEventListener("click", () => run(sent, "Saving…", () => rpcAction("mark_clarification_sent", { p_id: r.id },
           "Marked as sent", r.kind === "request" ? "The inquiry now waits for the client's reply." : "The reminder is recorded as sent.")));
-        parts.push(el("p", { text: "Send it from your own email: add the client's name in place of [CLIENT NAME] and yours in place of [EMPLOYEE NAME]. Then click Mark as sent." }),
+        parts.push(emailFacts(r),
+          el("p", { text: "Forward it (or copy it) from your own email: add the client's name in place of [CLIENT NAME] and yours in place of [EMPLOYEE NAME]. Then click Mark as sent." }),
           el("div", { class: "actions" }, copy, sent));
       }
       return parts;
@@ -415,6 +456,26 @@
 
       // Edit the tailored sections by hand; code rebuilds the file (not once released).
       if (released) {
+        const sentMail = emails.find((e) => e.kind === "proposal" && e.source_id === released.id && e.status === "sent");
+        const written = logRows.find((l) => l.proposal_id === released.id && l.status === "written");
+        const failedLog = logRows.find((l) => l.proposal_id === released.id && l.status === "failed");
+        const mailButton = el("button", { type: "button", class: "secondary", text: "Email it to me" });
+        mailButton.addEventListener("click", async () => {
+          mailButton.disabled = true;
+          const r = await callFunction("agent", { action: "email_proposal", proposal_id: released.id });
+          message.replaceChildren(notice(r.ok ? "ok" : "warn", r.ok ? "Emailed to you" : "Not emailed", (r.reasons || [r.error || ""]).join(" ")));
+          await load();
+        });
+        const logButton = el("button", { type: "button", class: "secondary", text: "Add to the materials log" });
+        logButton.addEventListener("click", async () => {
+          logButton.disabled = true;
+          const r = await callFunction("agent", { action: "log_materials", proposal_id: released.id });
+          message.replaceChildren(notice(r.ok ? "ok" : "warn", r.ok ? "Materials logged" : "Not logged", (r.reasons || [r.error || ""]).join(" ")));
+          await load();
+        });
+        section.append(el("ul", { class: "plain" },
+          el("li", {}, sentMail ? `Emailed to ${who(sentMail.to_user)}'s inbox on ${formatDateTime(sentMail.sent_at)}.` : "Not emailed yet. ", sentMail ? "" : mailButton),
+          el("li", {}, written ? `In the Google Sheets materials log (${written.updated_range || "added"}).` : `Not in the materials log yet${failedLog ? `: ${failedLog.error}` : ""}. `, written ? "" : logButton)));
         const olderR = proposals.filter((p) => p !== current);
         if (olderR.length) section.append(el("p", { class: "hint", text: `${olderR.length} earlier version(s) are kept.` }));
         section.append(status, reportProblemButton(id, "T4/T5 proposal"));
@@ -466,6 +527,18 @@
    * T6 · Review and D3: the quality checklist and the three outcomes for the current draft
    * (a recorded click; D3 runs in the database), then the earlier reviews with what T7 did.
    */
+  /** After release: email the file to the employee and add the materials-log row. */
+  async function afterRelease(proposalId) {
+    const [mail, log] = await Promise.all([
+      callFunction("agent", { action: "email_proposal", proposal_id: proposalId }),
+      callFunction("agent", { action: "log_materials", proposal_id: proposalId }),
+    ]);
+    message.append(
+      notice(mail.ok ? "ok" : "warn", mail.ok ? "Emailed to you" : "Not emailed", (mail.reasons || [mail.error || ""]).join(" ")),
+      notice(log.ok ? "ok" : "warn", log.ok ? "Materials logged" : "Not logged yet", (log.reasons || [log.error || ""]).join(" ")));
+    await load();
+  }
+
   function reviewCard(inquiry, proposals, reviews, runs) {
     const status = el("div");
     const section = el("section", { class: "card" }, el("h2", { style: "margin-top:0", text: "T6 · Review and D3 · Review outcome" }));
@@ -531,7 +604,7 @@
         }
         if (data.routed_to === "release") {
           message.replaceChildren(notice("ok", "Ready for release", "The final proposal is saved under this inquiry ID for download."));
-          await load();
+          await afterRelease(draft.id);
           return;
         }
         message.replaceChildren(notice("ok", `Review saved: ${OUTCOME[outcome]}`, `D3: ${ROUTE[data.routed_to]}.`));
