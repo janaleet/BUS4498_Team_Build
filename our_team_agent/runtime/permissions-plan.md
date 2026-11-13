@@ -29,7 +29,7 @@ Written in plain words with the BUS 4498 Agent Builder Kit. Our AI assistant bui
 | 5 | One revision run | At most 8 AI calls and 10 minutes | Fixed: only the builders change it | Only the builders, by changing the code |
 | 6 | Lessons read before drafting | At most 10 | Fixed: only the builders change it | Only the builders, by changing the code |
 | 7 | Client reply deadline | 3 business days, one reminder on day 2 | Fixed: only the builders change it | Only the builders, by changing the code |
-| 8 | AI models | Claude Haiku 5.5 to read, sort and draft clarifications; Claude Sonnet 5.5 for tailored proposals and revisions; either in test mode | Fixed: only the builders change it | Only the builders, by changing the code |
+| 8 | AI models | Claude Haiku 5.5 to read, sort, draft clarifications and write lessons; Claude Sonnet 5.5 for tailored proposals and revisions; either in test mode | Fixed: only the builders change it | Only the builders, by changing the code |
 
 ## 3. Ask first (hold for a person)
 
@@ -40,8 +40,7 @@ Written in plain words with the BUS 4498 Agent Builder Kit. Our AI assistant bui
 | 3 | The venue calendar shows the date booked | Holds the inquiry, with the reason “date appears booked” |
 | 4 | The recommended room is short of tables or chairs | Holds the inquiry for an employee |
 | 5 | Personal details can’t be removed from the inquiry | Holds it, and the employee removes them by hand |
-| 6 | Text in an inquiry tries to instruct the agent | Flags it for a person and doesn’t follow it |
-| 7 | A third Needs revision | Stops for the event coordinator |
+| 6 | A third Needs revision | Stops for the event coordinator |
 
 ## 4. Never
 
@@ -57,6 +56,7 @@ Written in plain words with the BUS 4498 Agent Builder Kit. Our AI assistant bui
 | 8 | Release a proposal without every checklist item ticked | Code and a database rule |
 | 9 | Approve, release or send anything on its own | Code and a database rule |
 | 10 | Act while paused | Code and a database rule |
+| 11 | Follow instructions written inside an inquiry | Code |
 
 ## 5. Who signs off
 
