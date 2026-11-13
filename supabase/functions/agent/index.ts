@@ -36,7 +36,7 @@ import { EXTRACTION_MODEL, extractEventDetails } from "./extract.ts";
 import { FLAG_MODEL, flagSetupQuestions } from "./flag.ts";
 import { assessSetup, setupReasons } from "./setup.js";
 import { findInstructionLikeText } from "./flags.js";
-import { DRAFT_MODEL, draftClarification } from "./draft.ts";
+import { DRAFT_MODEL, draftClarification, SKILL_USED } from "./draft.ts";
 import {
   addBusinessDays, assembleDraft, buildIssues, checkDraft, checklistWording, DEADLINE_BUSINESS_DAYS, eventSummary,
   mergeReplyFields, REMINDER_BUSINESS_DAY, todayInVenue,
@@ -620,6 +620,7 @@ async function runClarification(opts: {
       draft_problems: problems,
       redraft_of: opts.redraftOf ?? null,
       lessons_applied: draftedBy === "ai" ? lessonsApplied(lessons) : [],
+      skill_used: draftedBy === "ai" ? SKILL_USED : null,
     }).select("id").single();
     if (error) throw new Error(`clarification draft not saved: ${error.message}`);
     requestId = data.id;
@@ -637,6 +638,7 @@ async function runClarification(opts: {
     check,
     issues: opts.issues,
     lessons_applied: draftedBy === "ai" ? lessonsApplied(lessons) : [],
+    skill_used: draftedBy === "ai" ? SKILL_USED : null,
   };
 }
 

@@ -40,4 +40,4 @@ The client's company or organization name may stay.
 
 ## Deadline
 
-3 business days (Monday–Friday, excluding holidays) from the day the request is prepared. One reminder is sent on business day 2. Use `python3 -I scripts/clarify_tools.py deadline` for the date.
+3 business days (Monday–Friday, excluding holidays) from the day the request is approved. One reminder is drafted for business day 2. The agent's code sets both dates; the wording never states a date of its own.

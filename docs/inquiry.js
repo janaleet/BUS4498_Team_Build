@@ -281,6 +281,7 @@
             message.append(notice(learned.ok && learned.status === "learned" ? "ok" : "warn", "Lesson", (learned.reasons || [learned.error || ""]).join(" ")));
           });
         });
+        if (r.skill_used) parts.push(el("p", { class: "hint", text: `Drafted by the AI following the Skill ${r.skill_used}.${(r.lessons_applied || []).length ? ` Lessons applied: ${r.lessons_applied.join(" · ")}` : ""}` }));
         parts.push(
           el("p", { class: "hint", text: `Reply-by date in this draft: ${fmtDate(r.deadline)}. Approving resets it to 3 business days from today. You may edit the wording; the inquiry ID, the reply-by date and the reply line must stay, and no contact details may be added.` }),
           el("label", { for: subject.id, text: "Subject" }), subject,

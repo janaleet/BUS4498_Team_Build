@@ -2,7 +2,7 @@
 // The AI (draft.ts) only words the intro and the questions. Code decides which issues
 // need a question, the reply-by date (3 business days, Monday–Friday, minus holidays),
 // the subject and body layout, and checks every draft before anyone sees it.
-// Format follows the prepare-clarification-request skill (.claude/skills/).
+// Format follows the team Skill (our_team_agent/agent/skills/prepare-clarification-request/).
 
 const FIELD_LABELS = {
   event_type: "Event type",

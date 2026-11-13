@@ -38,6 +38,7 @@ All six groups are accepted: 1 (intake), 2 (setup needs), 3 (clarification reque
 | The agent | `supabase/functions/agent/` → Supabase → Edge Functions → `agent`. Deploy from the repository root: `supabase login` once, then `supabase functions deploy agent --remote=dfmoialxzwlahvvtgsbu --no-verify-jwt --use-api` |
 | Database tables and rules | `supabase/migrations/` (one file per group) |
 | Setup rules in code | `supabase/functions/agent/setup.js` (from `our_team_agent/docs/setup-and-routing-rules.md`, sections 4–5) |
+| The Skill (BUS4498 Skill Builder) | `our_team_agent/agent/skills/prepare-clarification-request/` — the agent loads its SKILL.md and both files into every clarification draft. After changing it, run `python3 -I supabase/package_skill.py`, then deploy; `tests/skill.test.js` checks the agent's copy matches. |
 | Clarification rules in code | `supabase/functions/agent/clarify.js` (layout, deadlines, checks) and `draft.ts` (AI wording) |
 | Proposal rules in code | `supabase/functions/agent/proposal.js` (fills and checks), `tailor.ts` (AI wording for T5), `template_docx.ts` (the template, generated from the .docx — regenerate it if the template changes) |
 | Review, revision and lessons in code | `supabase/functions/agent/revise.ts` (T7 calls) and `revise.js` (its order, limits and checks), `lessons.ts` and `lesson-rules.js`; D3 is `record_review` in the Group 5 migration |
