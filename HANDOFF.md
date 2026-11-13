@@ -23,7 +23,8 @@ All six groups are accepted: 1 (intake), 2 (setup needs), 3 (clarification reque
   - Gmail: approving a clarification request or reminder emails it to the approving employee's own inbox; releasing a proposal emails the Word file to the releasing employee. They forward it to the client — the agent never emails a client. Each message is emailed once (database rule), only after the approval or release click, only to staff, at most 20 a day (Settings).
   - Google Calendar (Task 3): the agent reads the venue calendar's free/busy for the event's date and hours. Booked → held for an employee ("date appears booked"); not connected or failed → "Availability not checked – check the calendar by hand" (never treated as free).
   - Google Sheets: each released proposal adds one row (event date, inquiry ID, room, layout, guests, tables, chairs, AV, release date) to the "JEvents materials log" sheet the agent creates the first time. One row per inquiry; no client details.
-- **Rooms page:** the rooms-and-equipment list the agent reads (starts with the example venue). Every change needs a reason and is recorded.
+- **Rooms page:** only a signed-in employee can change rooms (a database rule, `rooms_staff_only`, refuses the agent and anything else); to fix a room by SQL as the owner, disable that trigger for the change.
+- **Rooms page (details):** the rooms-and-equipment list the agent reads (starts with the example venue). Every change needs a reason and is recorded.
 - **Off switch:** Settings → Paused. While on, the agent does nothing and calls no AI.
 - **Report a problem** beside each decision; reports appear in Settings.
 - **Test mode:** `dry_run: true` decides as usual and saves nothing.
