@@ -4,7 +4,7 @@
 
 ## What works now
 
-Groups 1 (intake), 2 (setup needs), 3 (clarification requests), 4 (proposals) and 5 (review, revision, lessons, release) are accepted. Group 6 (Gmail, Calendar, Sheets) is built and live; it works once Google is connected (see **Connect Google** below).
+All six groups are accepted: 1 (intake), 2 (setup needs), 3 (clarification requests), 4 (proposals), 5 (review, revision, lessons, release) and 6 (Gmail, Calendar, Sheets). Google is connected; renew its token weekly (see **Connect Google** below).
 
 - **Website** (GitHub Pages, from the `docs/` folder): https://janaleet.github.io/BUS4498_Team_Build/ — sign-in, Dashboard, New inquiry (paste only), one page per inquiry, Rooms, Settings.
 - **The agent** (Edge Function `agent`):
@@ -89,7 +89,7 @@ Do this yourself; never paste a secret into chat. Use a personal Gmail account (
 
 ## What's next
 
-Connect Google and walk through Group 6. Then write `runtime/test-plan.md` in the Agent Builder Kit so the final test round can run. Write `runtime/test-plan.md` in the Agent Builder Kit once the agent runs.
+Write `runtime/test-plan.md` in the Agent Builder Kit (cases, expected results, models to compare) so the final test round can run against it. Write `runtime/test-plan.md` in the Agent Builder Kit once the agent runs.
 
 ## How we take turns
 

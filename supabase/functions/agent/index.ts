@@ -55,9 +55,8 @@ import { appendRow, createLogSheet, freeBusy, gmailSend, googleConfigured, googl
 import { buildRawEmail, eventWindow, forwardNote, isBooked, materialsRow } from "./google.js";
 
 const MAX_TEXT_LENGTH = 20_000;
-// Models test mode may compare. Add the models runtime/test-plan.md lists under
-// "Models to compare" once the test plan is written.
-const TEST_MODELS = [EXTRACTION_MODEL];
+// Models test mode may compare: runtime/test-plan.md → "Models to compare".
+const TEST_MODELS = [EXTRACTION_MODEL, TAILOR_MODEL];
 const STATUSES = ["template", "tailored", "clarify", "held", "paused", "refused"];
 const NEXT_STEP: Record<string, string> = {
   template: "t4_template_proposal",
