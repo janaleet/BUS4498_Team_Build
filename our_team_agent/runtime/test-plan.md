@@ -243,5 +243,20 @@ Runs per case: **3** (a model decides part of each result). Pass = the status an
 
 | Model | Price (input / output, per million tokens) | Passes (of 24) | Seconds per case | Cost per case |
 | --- | --- | --- | --- | --- |
-| Claude Haiku 5.5 (`claude-haiku-5-5`, current) | $0.10 / $0.50 | not run yet | — | — |
-| Claude Sonnet 5.5 (`claude-sonnet-5-5`) | $2 / $10 | not run yet | — | — |
+| Claude Haiku 5.5 (`claude-haiku-5-5`, current) | $0.10 / $0.50 | 24 of 24 | 8.1 | $0.0041 |
+| Claude Sonnet 5.5 (`claude-sonnet-5-5`) | $2 / $10 | 24 of 24 | 8.7 | $0.0188 |
+
+Run on 2026-11-12 against the live agent in test mode (agent v17), 3 runs of each of the 8 cases per model, run by Claude at the team's request. Cost per case is from the agent's own token records for each run and includes every AI call in the run; Haiku runs of N2 and N5 also include their Claude Sonnet 5.5 tailoring call (Task 5 always uses Sonnet 5.5).
+
+| Case | Haiku 5.5 passes | Haiku s/case | Sonnet 5.5 passes | Sonnet s/case |
+| --- | --- | --- | --- | --- |
+| N1 | 3/3 | 5.8 | 3/3 | 5.4 |
+| N2 | 3/3 | 17.3 | 3/3 | 15.4 |
+| N3 | 3/3 | 6.1 | 3/3 | 6.1 |
+| N4 | 3/3 | 4.6 | 3/3 | 5.2 |
+| N5 | 3/3 | 11.4 | 3/3 | 13.0 |
+| E1 | 3/3 | 5.7 | 3/3 | 6.9 |
+| E2 | 3/3 | 6.7 | 3/3 | 9.1 |
+| E3 | 3/3 | 7.3 | 3/3 | 8.7 |
+
+Set aside and run again (not counted): two E1 runs made while the Group 6 calendar test event was still in the venue calendar (the agent correctly answered `held`, "date appears booked", and flagged the hidden instruction), and one N1 run that hit a Supabase gateway timeout (504) when the function's worker shut down before any AI call was made.

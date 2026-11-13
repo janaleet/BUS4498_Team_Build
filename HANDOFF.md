@@ -87,9 +87,13 @@ Do this yourself; never paste a secret into chat. Use a personal Gmail account (
   - `/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc -m tests/google.test.js`
 - **Reset:** test mode saves nothing. Inquiries submitted on the website stay (they never expire, per the memory plan).
 
+## Test plan results
+
+`our_team_agent/runtime/test-plan.md` holds the 8 cases (N1–N5, E1–E3). Run on 2026-11-12 in test mode, 3 runs per case: Claude Haiku 5.5 passed 24 of 24 (8.1 s, about $0.004 per case); Claude Sonnet 5.5 passed 24 of 24 (8.7 s, about $0.019 per case). The agent keeps Haiku 5.5 for reading inquiries, sorting requests and drafting clarifications.
+
 ## What's next
 
-Write `runtime/test-plan.md` in the Agent Builder Kit (cases, expected results, models to compare) so the final test round can run against it. Write `runtime/test-plan.md` in the Agent Builder Kit once the agent runs.
+Set Settings → test runs per day back to 50 and the daily AI limit back to 100 (raised for the test round). Renew the Google token weekly. Write `runtime/test-plan.md` in the Agent Builder Kit once the agent runs.
 
 ## How we take turns
 
